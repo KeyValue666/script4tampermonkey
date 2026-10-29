@@ -1,0 +1,72 @@
+# 注意：sites/**/*.user.js、README.md、CHANGELOG.md 是本仓库的交付物，严禁加入忽略列表。
+
+# ---------- 编辑器 / IDE ----------
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.sublime-project
+.sublime-workspace
+*.code-workspace
+
+# ---------- 操作系统 ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ---------- Node.js（仅本地工具可能用到，脚本本身零依赖） ----------
+node_modules/
+.pnpm-store/
+.yarn/cache/
+.yarn/install-state.gz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ---------- 构建与分发产物 ----------
+dist/
+build/
+out/
+release/
+*.zip
+*.crx
+*.xpi
+*.vsix
+*.map
+
+# ---------- 日志与临时文件 ----------
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.pid
+.cache/
+tmp/
+
+# ---------- 本地环境与私有配置 ----------
+.env
+.env.*
+!.env.example
+*.local
+local/
+private/
+scratch/
+
+# ---------- 用户脚本本地调试 ----------
+# 脚本管理器导出的备份、本地注入用的测试页
+*.tampermonkey.json
+tampermonkey-backup*/
+debug/
+.tmp-dom/
