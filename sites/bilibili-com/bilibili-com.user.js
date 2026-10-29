@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      1.0.2
+// @version      2.0.1
 // @description  B 站首页隐藏轮播让推荐视频排成 2 行 × 5 列、Alt+R 旋转竖屏视频、可拖拽面板
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
@@ -36,7 +36,6 @@
 
   const DEFAULTS = {
     panelVisible: true,
-    minimized: false,
     left: null,
     top: 96,
     rotateEnabled: true,
@@ -104,7 +103,6 @@
     rotatedVideo: null,
     savedVideoStyle: null,
     panel: null,
-    panelBody: null,
     carousel: null,
     container: null,
     layoutTimer: 0,
@@ -323,13 +321,29 @@
         width: 272px;
         max-width: calc(100vw - 16px);
         color: #e8e8e8;
-        background: rgba(30, 32, 36, 0.96);
-        border: 1px solid rgba(255, 255, 255, 0.13);
-        border-radius: 12px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
+        background: linear-gradient(180deg, rgba(36, 39, 44, 0.97), rgba(27, 29, 33, 0.97));
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 14px;
+        box-shadow:
+          0 12px 40px rgba(0, 0, 0, 0.32),
+          0 2px 8px rgba(0, 0, 0, 0.18);
         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         overflow: hidden;
-        backdrop-filter: blur(12px);
+        backdrop-filter: blur(14px);
+        animation: s4tm-panel-in 0.24s ease-out;
+      }
+
+      /* display 切换会重放此动画，正好充当打开面板的过渡 */
+      @keyframes s4tm-panel-in {
+        from {
+          opacity: 0;
+          transform: translateY(-6px) scale(0.98);
+        }
+
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
       }
 
       #s4tm-panel * {
@@ -342,16 +356,29 @@
         justify-content: space-between;
         gap: 8px;
         padding: 11px 12px;
-        background: rgba(255, 255, 255, 0.06);
+        background: linear-gradient(90deg, rgba(0, 174, 236, 0.16), rgba(0, 174, 236, 0.04));
         cursor: move;
         user-select: none;
         touch-action: none;
       }
 
       #s4tm-title {
+        display: flex;
+        align-items: center;
+        gap: 7px;
         font-weight: 600;
         letter-spacing: 0.2px;
         white-space: nowrap;
+      }
+
+      #s4tm-title::before {
+        content: '';
+        flex: none;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #00aeec;
+        box-shadow: 0 0 6px rgba(0, 174, 236, 0.8);
       }
 
       .s4tm-actions {
@@ -362,17 +389,22 @@
       .s4tm-btn {
         min-width: 24px;
         border: 0;
-        border-radius: 6px;
+        border-radius: 7px;
         padding: 4px 8px;
         color: inherit;
         background: rgba(255, 255, 255, 0.1);
         cursor: pointer;
         font-size: 13px;
         line-height: 1;
+        transition: background 0.15s ease, transform 0.1s ease;
       }
 
       .s4tm-btn:hover {
-        background: rgba(255, 255, 255, 0.2);
+        background: rgba(255, 255, 255, 0.22);
+      }
+
+      .s4tm-btn:active {
+        transform: scale(0.9);
       }
 
       #s4tm-body {
@@ -380,22 +412,34 @@
       }
 
       .s4tm-section-title {
-        margin: 0 0 10px;
+        margin: 0 0 8px;
         color: #aeb6c2;
         font-size: 12px;
+        letter-spacing: 0.4px;
       }
 
       .s4tm-option {
         display: flex;
         align-items: flex-start;
         gap: 9px;
-        padding: 9px 0;
+        margin: 0 -8px;
+        padding: 9px 8px;
+        border-radius: 9px;
         cursor: pointer;
+        transition: background 0.15s ease;
+      }
+
+      .s4tm-option:hover {
+        background: rgba(255, 255, 255, 0.06);
       }
 
       .s4tm-option input {
+        flex: none;
+        width: 15px;
+        height: 15px;
         margin-top: 4px;
         accent-color: #00aeec;
+        cursor: pointer;
       }
 
       .s4tm-option small {
@@ -419,18 +463,41 @@
         z-index: 2147483647;
         right: 18px;
         bottom: 100px;
+        align-items: center;
+        justify-content: center;
+        width: 48px;
+        height: 48px;
         border: 0;
-        border-radius: 9px;
-        padding: 10px 13px;
+        border-radius: 50%;
+        padding: 0;
         color: #fff;
-        background: #00aeec;
-        box-shadow: 0 3px 14px rgba(0, 0, 0, 0.2);
+        background: linear-gradient(135deg, #00aeec, #0093d4);
+        box-shadow: 0 4px 16px rgba(0, 174, 236, 0.35);
         cursor: pointer;
-        font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
       }
 
       #s4tm-show-panel:hover {
-        background: #01b5f5;
+        background: linear-gradient(135deg, #01b8f5, #009ddf);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(0, 174, 236, 0.45);
+      }
+
+      #s4tm-show-panel:active {
+        transform: translateY(0);
+      }
+
+      /* 用户偏好减少动效时，去掉全部过渡与动画 */
+      @media (prefers-reduced-motion: reduce) {
+        #s4tm-panel {
+          animation: none;
+        }
+
+        #s4tm-show-panel,
+        .s4tm-btn,
+        .s4tm-option {
+          transition: none;
+        }
       }
 
       /*
@@ -459,19 +526,7 @@
     saveSettings();
 
     if (state.panel) state.panel.style.display = visible ? '' : 'none';
-    getShowButton().style.display = visible ? 'none' : 'block';
-  }
-
-  function updateMinimizeState() {
-    if (!state.panelBody) return;
-
-    state.panelBody.style.display = settings.minimized ? 'none' : 'block';
-
-    const button = document.getElementById('s4tm-minimize');
-    if (button) {
-      button.textContent = settings.minimized ? '+' : '−';
-      button.title = settings.minimized ? '展开面板' : '最小化面板';
-    }
+    getShowButton().style.display = visible ? 'none' : 'flex';
   }
 
   function placePanel() {
@@ -496,7 +551,22 @@
     const button = document.createElement('button');
     button.id = 's4tm-show-panel';
     button.type = 'button';
-    button.textContent = 'B站工具';
+    button.title = 'B站工具';
+    button.setAttribute('aria-label', '打开 B站工具面板');
+    // 静态吉祥物图标（小电视：白底 + 蓝色双目 + 腮红，透明背景），无任何站点数据参与拼接
+    button.innerHTML = `
+      <svg viewBox="0 0 48 48" width="32" height="32" aria-hidden="true">
+        <path d="M14.5 5.5 21 12.5" stroke="#fff" stroke-width="3.5"
+          stroke-linecap="round" fill="none" />
+        <path d="M33.5 5.5 27 12.5" stroke="#fff" stroke-width="3.5"
+          stroke-linecap="round" fill="none" />
+        <rect x="6" y="12" width="36" height="28" rx="9" fill="#fff" />
+        <rect x="17.5" y="21.5" width="4.6" height="9.4" rx="2.3" fill="#00a0d8" />
+        <rect x="25.9" y="21.5" width="4.6" height="9.4" rx="2.3" fill="#00a0d8" />
+        <circle cx="13.2" cy="28.6" r="2.3" fill="#b8e2f2" />
+        <circle cx="34.8" cy="28.6" r="2.3" fill="#b8e2f2" />
+      </svg>
+    `;
     button.addEventListener('click', () => setPanelVisible(true));
 
     document.body.appendChild(button);
@@ -565,7 +635,6 @@
       <div id="s4tm-header">
         <span id="s4tm-title">B站个性化增强</span>
         <div class="s4tm-actions">
-          <button class="s4tm-btn" id="s4tm-minimize" type="button" title="最小化面板">−</button>
           <button class="s4tm-btn" id="s4tm-hide" type="button" title="隐藏面板">×</button>
         </div>
       </div>
@@ -595,7 +664,6 @@
     document.body.appendChild(panel);
 
     state.panel = panel;
-    state.panelBody = panel.querySelector('#s4tm-body');
 
     const rotateToggle = panel.querySelector('#s4tm-rotate');
     const gridToggle = panel.querySelector('#s4tm-grid');
@@ -623,16 +691,9 @@
       setPanelVisible(false);
     });
 
-    panel.querySelector('#s4tm-minimize').addEventListener('click', () => {
-      settings.minimized = !settings.minimized;
-      updateMinimizeState();
-      saveSettings();
-    });
-
     makeDraggable(panel, panel.querySelector('#s4tm-header'));
 
     placePanel();
-    updateMinimizeState();
     getShowButton();
 
     if (!settings.panelVisible) {

@@ -44,7 +44,7 @@
 
 | 站点 | 脚本 | 版本 | 功能简介 | 功能说明 |
 | --- | --- | --- | --- | --- |
-| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 1.0.2 | 首页推荐 2 × 5 列 + Alt+R 视频旋转 | [说明](sites/bilibili-com/README.md) |
+| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 2.0.1 | 首页推荐 2 × 5 列 + Alt+R 视频旋转 | [说明](sites/bilibili-com/README.md) |
 
 <!--
 新增站点时复制下面这行并替换占位内容：
