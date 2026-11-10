@@ -70,3 +70,4 @@ scratch/
 tampermonkey-backup*/
 debug/
 .tmp-dom/
+.workbuddy/
