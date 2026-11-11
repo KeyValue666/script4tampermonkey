@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.0.1
-// @description  B 站首页隐藏轮播让推荐视频排成 2 行 × 5 列、Alt+R 旋转竖屏视频、可拖拽面板
+// @version      2.2.0
+// @description  B 站首页隐藏轮播让推荐视频排成 2 行 × 5 列、Alt+R 旋转竖屏视频、一键提取视频音频
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
 // @match        https://t.bilibili.com/*
@@ -32,6 +32,8 @@
     layoutDebounce: 260,
     /** 与你在控制台手动使用的变换保持一致 */
     rotateTransform: 'rotate(-90deg) scale(1.78)',
+    /** 音轨直链可能较大，超时放宽到 30 秒 */
+    fetchTimeout: 30000,
   };
 
   const DEFAULTS = {
@@ -106,6 +108,7 @@
     carousel: null,
     container: null,
     layoutTimer: 0,
+    extracting: false,
   };
 
   function getCurrentVideo() {
@@ -306,6 +309,222 @@
     window.addEventListener('pageshow', () => scheduleLayout(400));
   }
 
+  /* ---------- 功能三：提取当前视频音频 ---------- */
+
+  /*
+   * B 站视频页内嵌 window.__playinfo__，其中 dash.audio 是与画面分开的完整音轨
+   * （AAC / fMP4，一个 URL 就是整段音频）。直接下载这条音轨即可：秒级完成、
+   * 无损、不需要播放，也不用 MediaRecorder 实时录音。
+   *
+   * 浏览器没有 MP3 编码器：MediaRecorder 只给 opus / AAC，WebCodecs 也没有
+   * mp3 AudioEncoder。硬把 AAC 改名成 .mp3 只会产出坏文件，所以这里如实导出
+   * 为 .m4a；需要 mp3 必须用 ffmpeg 之类的工具转码（见站点 README）。
+   */
+
+  const PLAYINFO_PATTERN = /window\s*\.\s*__playinfo__\s*=\s*/;
+  const INITIAL_STATE_PATTERN = /window\s*\.\s*__INITIAL_STATE__\s*=\s*/;
+
+  /** 从 startIndex 起截出一个完整 JSON 对象，避免内联 script 后面还有别的语句 */
+  function extractJsonObject(text, startIndex) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = startIndex; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+
+      if (char === '"') inString = true;
+      else if (char === '{') depth += 1;
+      else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) return text.slice(startIndex, index + 1);
+      }
+    }
+
+    return null;
+  }
+
+  /** 优先读页面全局；脚本跑在隔离世界时回退到解析内联 script */
+  function readPageObject(globalKey, assignPattern) {
+    const direct = window[globalKey];
+    if (direct && typeof direct === 'object') return direct;
+
+    for (const script of document.querySelectorAll('script')) {
+      const source = script.textContent || '';
+      const match = assignPattern.exec(source);
+      if (!match) continue;
+
+      const json = extractJsonObject(source, match.index + match[0].length);
+      if (!json) continue;
+
+      try {
+        return JSON.parse(json);
+      } catch (err) {
+        warn(`解析 ${globalKey} 失败`, err);
+      }
+    }
+
+    return null;
+  }
+
+  function getPlayInfo() {
+    return readPageObject('__playinfo__', PLAYINFO_PATTERN);
+  }
+
+  function getCid() {
+    const initial = readPageObject('__INITIAL_STATE__', INITIAL_STATE_PATTERN);
+    return initial?.videoData?.cid || window.cid || null;
+  }
+
+  function sanitizeFileName(name) {
+    return name.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  }
+
+  /** 文件名优先用 BV 号，退化到页面标题 */
+  function getVideoLabel() {
+    const match = location.pathname.match(/\/video\/(BV\w+)/i);
+    if (match) return match[1];
+
+    const title = document.title.replace(/[_\-|]\s*哔哩哔哩.*$/, '').trim();
+    return title || 'bilibili-audio';
+  }
+
+  /** 只挑 AAC 音轨；杜比 / FLAC 编码不能塞进 m4a 容器 */
+  function pickAudioTrack(dash) {
+    const tracks = [
+      ...(dash?.audio || []),
+      ...(dash?.dolby?.audio || []),
+    ];
+    const aac = tracks.filter((item) => !item.codecs || item.codecs.includes('mp4a'));
+    const candidates = aac.length ? aac : tracks;
+
+    return candidates.reduce(
+      (best, item) => ((item.bandwidth || 0) > (best?.bandwidth || 0) ? item : best),
+      null,
+    );
+  }
+
+  /** 页面只给 durl（旧格式）时，向官方 playurl 接口补一份 dash 信息 */
+  async function requestDashAudio() {
+    const bvid = location.pathname.match(/\/video\/(BV\w+)/i)?.[1];
+    const cid = getCid();
+    if (!bvid || !cid) return null;
+
+    const api = 'https://api.bilibili.com/x/player/playurl'
+      + `?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`
+      + '&qn=0&fnval=16&fnver=0&fourk=1';
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CONFIG.fetchTimeout);
+    try {
+      const response = await fetch(api, { credentials: 'include', signal: controller.signal });
+      if (!response.ok) return null;
+      const data = await response.json();
+      return data?.data?.dash || null;
+    } catch (err) {
+      warn('playurl 查询失败', err);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 依次尝试主直链与备用直链；每个请求独立配 AbortController 超时 */
+  async function fetchAudioBlob(track) {
+    const backups = track.backupUrl || track.backup_url || [];
+    const urls = [track.baseUrl || track.base_url, ...backups]
+      .filter((url) => typeof url === 'string' && url.startsWith('https://'))
+      .slice(0, 3);
+
+    if (!urls.length) throw new Error('播放信息里没有可用的音频直链');
+
+    let lastError = null;
+    for (const url of urls) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CONFIG.fetchTimeout);
+
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        if (blob.size < 1024) throw new Error('返回的音频数据为空');
+        return blob;
+      } catch (err) {
+        lastError = err;
+        log('音频直链失败，尝试备用地址', err);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    throw lastError || new Error('音频下载失败');
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    // 立即 revoke 会让部分浏览器中断下载，延后释放
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  function setAudioUi(isBusy, message) {
+    const button = document.getElementById('s4tm-audio');
+    const status = document.getElementById('s4tm-audio-status');
+
+    if (button) {
+      button.disabled = isBusy;
+      button.textContent = isBusy ? '提取中…' : '提取音频';
+    }
+    if (status && message) status.textContent = message;
+  }
+
+  async function extractAudio() {
+    if (state.extracting) return;
+    state.extracting = true;
+    setAudioUi(true, '正在读取页面播放信息…');
+
+    try {
+      let dash = getPlayInfo()?.data?.dash;
+      if (!dash?.audio?.length) {
+        setAudioUi(true, '页面未内嵌音轨，正在查询播放地址…');
+        dash = await requestDashAudio();
+      }
+
+      const track = pickAudioTrack(dash);
+      if (!track) {
+        setAudioUi(false, '没找到独立音轨：刷新页面或登录后重试');
+        return;
+      }
+
+      setAudioUi(true, '正在下载完整音频轨…');
+      const blob = await fetchAudioBlob(track);
+      downloadBlob(blob, `${sanitizeFileName(getVideoLabel())}-audio.m4a`);
+
+      log('音频已导出', blob.size);
+      setAudioUi(false, `已保存 ${(blob.size / 1048576).toFixed(1)} MB · m4a / AAC 无损`);
+    } catch (err) {
+      warn('音频提取失败', err);
+      setAudioUi(false, `提取失败：${err?.message || '网络异常，可刷新后重试'}`);
+    } finally {
+      state.extracting = false;
+    }
+  }
+
   /* ---------- 样式 ---------- */
 
   function installStyles() {
@@ -449,6 +668,42 @@
         font-size: 11px;
       }
 
+      .s4tm-section-title--spaced {
+        margin-top: 14px;
+      }
+
+      #s4tm-audio {
+        display: block;
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 9px;
+        color: #e6f7fe;
+        background: rgba(0, 174, 236, 0.2);
+        font-size: 13px;
+        transition: background 0.15s ease, transform 0.1s ease;
+      }
+
+      #s4tm-audio:hover {
+        background: rgba(0, 174, 236, 0.32);
+      }
+
+      #s4tm-audio:disabled {
+        cursor: wait;
+        opacity: 0.7;
+      }
+
+      #s4tm-audio:active {
+        transform: scale(0.98);
+      }
+
+      #s4tm-audio-status {
+        margin-top: 7px;
+        color: #aeb6c2;
+        font-size: 11px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
       #s4tm-footer {
         margin-top: 8px;
         padding-top: 9px;
@@ -533,8 +788,9 @@
     if (!state.panel) return;
 
     const width = state.panel.offsetWidth || 272;
+    const height = state.panel.offsetHeight || 220;
     const maxLeft = Math.max(8, window.innerWidth - width - 8);
-    const maxTop = Math.max(8, window.innerHeight - 56);
+    const maxTop = Math.max(8, window.innerHeight - Math.min(height, window.innerHeight - 16) - 8);
 
     if (settings.left === null) settings.left = maxLeft;
     settings.left = Math.min(maxLeft, Math.max(8, settings.left));
@@ -597,7 +853,7 @@
       if (!dragging) return;
 
       const maxLeft = Math.max(0, window.innerWidth - element.offsetWidth);
-      const maxTop = Math.max(0, window.innerHeight - 40);
+      const maxTop = Math.max(0, window.innerHeight - element.offsetHeight);
 
       const left = Math.min(
         maxLeft,
@@ -657,6 +913,11 @@
           </span>
         </label>
 
+        <div class="s4tm-section-title s4tm-section-title--spaced">音频提取</div>
+
+        <button class="s4tm-btn" id="s4tm-audio" type="button">提取音频</button>
+        <div id="s4tm-audio-status">一键导出完整音轨 · m4a / AAC 无损</div>
+
         <div id="s4tm-footer">配置自动保存 · 仅作用于 B 站</div>
       </div>
     `;
@@ -689,6 +950,10 @@
 
     panel.querySelector('#s4tm-hide').addEventListener('click', () => {
       setPanelVisible(false);
+    });
+
+    panel.querySelector('#s4tm-audio').addEventListener('click', () => {
+      extractAudio();
     });
 
     makeDraggable(panel, panel.querySelector('#s4tm-header'));
