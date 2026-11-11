@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.2.0
+// @version      2.2.1
 // @description  B 站首页隐藏轮播让推荐视频排成 2 行 × 5 列、Alt+R 旋转竖屏视频、一键提取视频音频
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
@@ -384,16 +384,32 @@
   }
 
   function sanitizeFileName(name) {
-    return name.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return name
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/[.\s]+$/, '')
+      .slice(0, 80)
+      .trim();
   }
 
-  /** 文件名优先用 BV 号，退化到页面标题 */
-  function getVideoLabel() {
-    const match = location.pathname.match(/\/video\/(BV\w+)/i);
-    if (match) return match[1];
+  /** 文件名与视频标题一致：优先页面内嵌状态，其次标题 DOM，最后清洗 document.title */
+  function getVideoTitle() {
+    const initial = readPageObject('__INITIAL_STATE__', INITIAL_STATE_PATTERN);
+    const fromState = initial?.videoData?.title || initial?.mediaInfo?.title;
+    if (fromState && fromState.trim()) return fromState.trim();
 
-    const title = document.title.replace(/[_\-|]\s*哔哩哔哩.*$/, '').trim();
-    return title || 'bilibili-audio';
+    const heading = document.querySelector(
+      'h1.video-title, h1.title, .video-title, .media-title, #viewbox_report h1',
+    );
+    const fromDom = heading?.textContent?.trim();
+    if (fromDom) return fromDom;
+
+    return document.title
+      .replace(/[_|–—-]\s*哔哩哔哩.*$/i, '')
+      .replace(/[_|–—-]\s*bilibili.*$/i, '')
+      .trim();
   }
 
   /** 只挑 AAC 音轨；杜比 / FLAC 编码不能塞进 m4a 容器 */
@@ -513,7 +529,8 @@
 
       setAudioUi(true, '正在下载完整音频轨…');
       const blob = await fetchAudioBlob(track);
-      downloadBlob(blob, `${sanitizeFileName(getVideoLabel())}-audio.m4a`);
+      const filename = sanitizeFileName(getVideoTitle()) || 'bilibili-audio';
+      downloadBlob(blob, `${filename}.m4a`);
 
       log('音频已导出', blob.size);
       setAudioUi(false, `已保存 ${(blob.size / 1048576).toFixed(1)} MB · m4a / AAC 无损`);

@@ -44,7 +44,7 @@
 
 | 站点 | 脚本 | 版本 | 功能简介 | 功能说明 |
 | --- | --- | --- | --- | --- |
-| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 2.2.0 | 首页推荐 2 × 5 列 + Alt+R 视频旋转 + 音频提取 | [说明](sites/bilibili-com/README.md) |
+| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 2.2.1 | 首页推荐 2 × 5 列 + Alt+R 视频旋转 + 音频提取 | [说明](sites/bilibili-com/README.md) |
 | 虎牙直播 | [huya-com.user.js](sites/huya-com/huya-com.user.js) | 0.2.0 | 只留视频 / 弹幕 / 发言，隐藏推荐礼物侧栏、铺满视口并拦截埋点广告请求 | [说明](sites/huya-com/README.md) |
 
 <!--

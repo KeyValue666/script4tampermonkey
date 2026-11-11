@@ -5,7 +5,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 脚本文件 | [bilibili-com.user.js](./bilibili-com.user.js) |
-| 当前版本 | `2.2.0` |
+| 当前版本 | `2.2.1` |
 | 适配域名 | `https://www.bilibili.com/*`、`https://t.bilibili.com/*` |
 | 脚本管理器 | Tampermonkey 5.x / Violentmonkey 2.x |
 | 安装 | [点击安装](https://raw.githubusercontent.com/KeyValue666/script4tampermonkey/main/sites/bilibili-com/bilibili-com.user.js) |
@@ -23,7 +23,7 @@
 2. 勾选「首页推荐 2 行 × 5 列」：轮播图消失，推荐卡片排成 2 行 × 5 列；取消勾选立即还原。
 3. 播放视频时按 `Alt + R` 旋转，再按一次恢复；在输入框里按不会触发。
 4. 拖动标题栏可移动面板；点 `×` 隐藏面板。
-5. 在视频页点「提取音频」：按钮变成「提取中…」，几秒内自动下载 `BV号-audio.m4a`，无需播放视频、无需等待时长。
+5. 在视频页点「提取音频」：按钮变成「提取中…」，几秒内自动下载 `视频标题.m4a`（文件名与视频标题一致），无需播放视频、无需等待时长。
 6. 想要 mp3：浏览器本身编不了 mp3，用本地 ffmpeg 转一次，命令见「已知限制」。
 7. 面板位置与开关保存在浏览器本地，下次打开仍生效。
 
@@ -58,7 +58,7 @@
 - **首页有约 0.3 秒延迟**：B 站首屏会重绘推荐区，脚本等页面稳定后才应用布局，避免抖动。
 - **导出的是 m4a，不是 mp3**：B 站音轨是 AAC / fMP4，浏览器没有任何 MP3 编码器（`MediaRecorder` 只给 opus / AAC，WebCodecs 也没有 mp3 编码器）。把 AAC 文件改名成 `.mp3` 只会得到坏文件，所以脚本如实导出 `.m4a`。要 mp3 就用 ffmpeg 转一次，音质不变（有损转码一次，可提高 `-b:a 320k`）：
   ```bash
-  ffmpeg -i BV号-audio.m4a -codec:a libmp3lame -b:a 320k BV号-audio.mp3
+  ffmpeg -i "视频标题.m4a" -codec:a libmp3lame -b:a 320k "视频标题.mp3"
   ```
 - **CDN 防盗链可能导致 403**：脚本会依次尝试主直链与最多两个备用直链；仍失败时提示「提取失败」。刷新页面重新获取直链后重试即可。
 - **旧格式（durl）稿件**：页面没有内嵌 DASH 音轨时，脚本会向官方 `playurl` 接口补查；查不到就只提示，不报错。
@@ -93,7 +93,7 @@
 
 那两版按「整页视频卡片的公共祖先」推断网格，并向网格注入轮播卡片。B 站首页是服务端渲染 + 客户端重绘，几秒后推荐流、广告、分区的卡片陆续挂载，公共祖先一路上移，最终 `display: grid` 被加到接近整页的容器上，出现「静默几秒后排版错乱」；同时容器选择器 `.bili-grid` 在当前版本已经不存在，功能实际从未生效。
 
-### 音频提取实现（2.2.0）
+### 音频提取实现（2.2.1）
 
 B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画面分离的**完整音轨**：AAC 编码、fMP4 容器，`baseUrl` 一个地址就是整段音频（含初始化段与索引段）。所以直接下载即可，不需要播放、不需要录制、不需要拼接分片。
 
@@ -101,7 +101,7 @@ B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画�
 2. `pickAudioTrack()` 从 `dash.audio`（必要时含 `dash.dolby.audio`）里挑码率最高的 AAC 轨，跳过杜比 / FLAC 这类塞不进 m4a 的编码。
 3. 页面只有 `durl`（旧格式）时，`requestDashAudio()` 用 `bvid + cid` 查一次公开的 `api.bilibili.com/x/player/playurl?fnval=16`，拿到 dash 音轨；查不到就降级提示。
 4. `fetchAudioBlob()` 依次尝试 `baseUrl` / `backupUrl`（最多 3 个），每个请求独立 `AbortController` + 30 秒超时；全部失败才抛错。
-5. 下载用 `Blob` + `a[download]`，文件名 `BV号-audio.m4a`；60 秒后 `revokeObjectURL`。请求期间按钮置灰防重复点击。
+5. `getVideoTitle()` 按「`__INITIAL_STATE__.videoData.title` → 标题 DOM → 清洗 `document.title`」取视频名，经 `sanitizeFileName()` 去掉非法字符后直接作为文件名（`视频标题.m4a`）；下载用 `Blob` + `a[download]`，60 秒后 `revokeObjectURL`。请求期间按钮置灰防重复点击。
 
 **为什么不直接出 mp3**：浏览器没有 MP3 编码器，且本项目禁止引入外部依赖 / CDN / WASM 转码库。硬改扩展名只会产出无法播放的假 mp3，因此输出保持原始 AAC 容器；转 mp3 交给本地 ffmpeg（命令见「已知限制」）。
 
@@ -128,7 +128,7 @@ B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画�
 3. 点「换一换」刷新推荐，确认仍是 2 行 × 5 列。
 4. 取消勾选「首页推荐 2 行 × 5 列」，确认轮播恢复、卡片回到 3 + 3 + 4 排列。
 5. 视频页按 `Alt + R` 旋转，再按恢复；在搜索框里按不应触发。
-6. 视频页点「提取音频」：几秒内下载 `BV号-audio.m4a`，用播放器打开能听到完整声音、时长与稿件一致；按钮恢复「提取音频」。
+6. 视频页点「提取音频」：几秒内下载的文件名应与页面视频标题一致（例如 `【4K】测试视频.m4a`），用播放器打开能听到完整声音、时长与稿件一致；按钮恢复「提取音频」。
 7. 首页点「提取音频」：应提示「没找到独立音轨」或类似降级文案，Console 不报错、页面无异常。
 8. 用 DevTools 屏蔽主直链（模拟 403）：应自动尝试备用地址，或给出「提取失败」提示，不抛未捕获异常。
 9. 提取过程中反复点击按钮：按钮置灰，只触发一次下载。
