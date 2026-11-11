@@ -1,5 +1,19 @@
 # 变更记录
 
+## [2.2.2] - 2026-11-11
+
+### 修复
+
+- 补统一资源登记与 `destroy()` 调试接口：监听器、`MutationObserver`、定时器、`AbortController`、objectURL、注入的 DOM 与样式集中回收；`debug` 模式下可在控制台调用 `__S4TM__.destroy()` 主动还原。`init()` / `startLayoutWatcher()` 加幂等，重复注入不再叠加观察者与监听。
+- 修复 detached DOM 引用：旋转过的 `<video>`、首页轮播与网格容器在节点脱离文档后即时断开引用；`Alt + R` 找不到视频时也释放旧引用。
+- `pointermove` 改为按下时缓存面板尺寸、`requestAnimationFrame` 每帧只写一次 DOM，消除拖动时的强制同步布局与掉帧。
+- 单次音频提取内缓存 `__playinfo__` / `__INITIAL_STATE__` 解析结果，避免隔离世界下同一份大对象被重复解析两次。
+
+### 变更
+
+- `objectURL` 释放由 60 秒缩到 3 秒，句柄登记后可在卸载时提前 revoke，不再让整段音轨 Blob 长时间挂住内存。
+- 音轨直链增加协议与内网地址校验（拒绝非 HTTPS、裸 IP、localhost / 内网段）；仍不做 CDN 域白名单，避免误伤 B 站动态调度的 CDN 域名。
+
 ## [2.2.1] - 2026-11-11
 
 ### 变更

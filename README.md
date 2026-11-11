@@ -44,10 +44,10 @@
 
 | 站点 | 脚本 | 版本 | 功能简介 | 功能说明 |
 | --- | --- | --- | --- | --- |
-| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 2.2.1 | 首页推荐 2 × 5 列 + Alt+R 视频旋转 + 音频提取 | [说明](sites/bilibili-com/README.md) |
-| 虎牙直播 | [huya-com.user.js](sites/huya-com/huya-com.user.js) | 0.2.0 | 只留视频 / 弹幕 / 发言，隐藏推荐礼物侧栏、铺满视口并拦截埋点广告请求 | [说明](sites/huya-com/README.md) |
+| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 2.2.2 | 首页推荐 2 × 5 列 + Alt+R 视频旋转 + 音频提取 | [说明](sites/bilibili-com/README.md) |
+| 虎牙直播 | [huya-com.user.js](sites/huya-com/huya-com.user.js) | 0.2.1 | 只留视频 / 弹幕 / 发言，隐藏推荐礼物侧栏、铺满视口并拦截埋点广告请求 | [说明](sites/huya-com/README.md) |
 | 抖音 | [douyin-com.user.js](sites/douyin-com/douyin-com.user.js) | 0.1.1 | 刷视频去广告 / 看直播只留画面与弹幕，拦截埋点广告请求、预取与特效开销 | [说明](sites/douyin-com/README.md) |
-| 小红书 | [xiaohongshu-com.user.js](sites/xiaohongshu-com/xiaohongshu-com.user.js) | 0.1.0 | 笔记页一键打包下载全部图片，取 CDN 原图、去压缩与水印参数 | [说明](sites/xiaohongshu-com/README.md) |
+| 小红书 | [xiaohongshu-com.user.js](sites/xiaohongshu-com/xiaohongshu-com.user.js) | 0.1.1 | 笔记页一键打包下载全部图片，取 CDN 原图、去压缩与水印参数 | [说明](sites/xiaohongshu-com/README.md) |
 
 <!--
 新增站点时复制下面这行并替换占位内容：

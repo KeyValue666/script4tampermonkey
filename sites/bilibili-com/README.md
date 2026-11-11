@@ -5,7 +5,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 脚本文件 | [bilibili-com.user.js](./bilibili-com.user.js) |
-| 当前版本 | `2.2.1` |
+| 当前版本 | `2.2.2` |
 | 适配域名 | `https://www.bilibili.com/*`、`https://t.bilibili.com/*` |
 | 脚本管理器 | Tampermonkey 5.x / Violentmonkey 2.x |
 | 安装 | [点击安装](https://raw.githubusercontent.com/KeyValue666/script4tampermonkey/main/sites/bilibili-com/bilibili-com.user.js) |
@@ -63,6 +63,7 @@
 - **CDN 防盗链可能导致 403**：脚本会依次尝试主直链与最多两个备用直链；仍失败时提示「提取失败」。刷新页面重新获取直链后重试即可。
 - **旧格式（durl）稿件**：页面没有内嵌 DASH 音轨时，脚本会向官方 `playurl` 接口补查；查不到就只提示，不报错。
 - **只拿当前账号有权播放的音轨**：不伪造登录态、不绕过会员校验、不解析签名；直链过期就刷新页面重取。
+- **禁用脚本后需刷新页面**：油猴禁用脚本时不会通知已注入实例，脚本无法自动卸载。所有资源已集中登记，调试时把 `CONFIG.debug` 改为 `true` 后可在控制台执行 `__S4TM__.destroy()` 主动还原；普通用户刷新一次页面即可彻底回收。
 
 ## 变更记录
 
@@ -101,9 +102,13 @@ B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画�
 2. `pickAudioTrack()` 从 `dash.audio`（必要时含 `dash.dolby.audio`）里挑码率最高的 AAC 轨，跳过杜比 / FLAC 这类塞不进 m4a 的编码。
 3. 页面只有 `durl`（旧格式）时，`requestDashAudio()` 用 `bvid + cid` 查一次公开的 `api.bilibili.com/x/player/playurl?fnval=16`，拿到 dash 音轨；查不到就降级提示。
 4. `fetchAudioBlob()` 依次尝试 `baseUrl` / `backupUrl`（最多 3 个），每个请求独立 `AbortController` + 30 秒超时；全部失败才抛错。
-5. `getVideoTitle()` 按「`__INITIAL_STATE__.videoData.title` → 标题 DOM → 清洗 `document.title`」取视频名，经 `sanitizeFileName()` 去掉非法字符后直接作为文件名（`视频标题.m4a`）；下载用 `Blob` + `a[download]`，60 秒后 `revokeObjectURL`。请求期间按钮置灰防重复点击。
+5. `getVideoTitle()` 按「`__INITIAL_STATE__.videoData.title` → 标题 DOM → 清洗 `document.title`」取视频名，经 `sanitizeFileName()` 去掉非法字符后直接作为文件名（`视频标题.m4a`）；下载用 `Blob` + `a[download]`，3 秒后 `revokeObjectURL`（句柄登记在 `runtime`，卸载时可提前释放）。请求期间按钮置灰防重复点击。
 
 **为什么不直接出 mp3**：浏览器没有 MP3 编码器，且本项目禁止引入外部依赖 / CDN / WASM 转码库。硬改扩展名只会产出无法播放的假 mp3，因此输出保持原始 AAC 容器；转 mp3 交给本地 ffmpeg（命令见「已知限制」）。
+
+### 资源回收（2.2.2）
+
+所有监听器、观察者、定时器、`AbortController` 与 objectURL 统一登记在 `runtime`，`destroy()` 一次性回收；`init()` 与 `startLayoutWatcher()` 都有幂等标记，重复注入不叠加。首页布局与视频旋转持有的 DOM 引用在节点脱离文档时立即断开。拖动面板只在 `pointerdown` 时读一次尺寸，位置写入合并到 `requestAnimationFrame`。音轨直链只校验 HTTPS 与「非裸 IP / 非内网」，不设 CDN 域白名单——B 站 CDN 域随调度变化，硬白名单会误伤正常下载。
 
 ### 选择器依赖
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 虎牙直播 · 清爽观影
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/huya-com
-// @version      0.2.0
+// @version      0.2.1
 // @description  虎牙直播间只留视频、弹幕和发言：隐藏推荐、礼物、侧栏，并拦截埋点广告请求降低占用
 // @author       KeyValue666
 // @match        https://www.huya.com/*
@@ -37,6 +37,8 @@
     perfHotkey: 'p',
     /** 拦截计数写按钮文案的防抖间隔，避免高频 DOM 写入 */
     countDebounce: 400,
+    /** 房间标题子树变动频繁，观察回调必须防抖后再读 DOM */
+    metaDebounce: 150,
   };
 
   /** 明确排除的非直播间路径：避免首页、分类、列表页误挂开关按钮 */
@@ -69,11 +71,16 @@
 
   const state = {
     mounted: false,
+    mounting: false,
+    routePatched: false,
     guardInstalled: false,
     enabled: true,
     perfEnabled: true,
     blockedCount: 0,
     countTimer: 0,
+    metaTimer: 0,
+    metaObserver: null,
+    metaGeneration: 0,
     bar: null,
     toggle: null,
     perfToggle: null,
@@ -337,13 +344,16 @@
       display: none !important;
     }
 
-    /* 动态礼物/充值面板：只匹配明确的面板类名，不碰弹幕消息节点 */
-    html[data-s4tm-clean="1"] [class*="gift-panel"],
-    html[data-s4tm-clean="1"] [class*="giftPanel"],
-    html[data-s4tm-clean="1"] [class*="gift-bar"],
-    html[data-s4tm-clean="1"] [class*="giftBar"],
-    html[data-s4tm-clean="1"] [class*="recharge-panel"],
-    html[data-s4tm-clean="1"] [class*="noble-panel"] {
+    /*
+     * 动态礼物 / 充值面板的类名由站点拼接，只能用子串匹配（并非明确类名）。
+     * 规则带清爽模式前缀并排除脚本自建节点；站点改版若误伤，按 Alt + H 即刻还原。
+     */
+    html[data-s4tm-clean="1"] [class*="gift-panel"]:not([data-s4tm]),
+    html[data-s4tm-clean="1"] [class*="giftPanel"]:not([data-s4tm]),
+    html[data-s4tm-clean="1"] [class*="gift-bar"]:not([data-s4tm]),
+    html[data-s4tm-clean="1"] [class*="giftBar"]:not([data-s4tm]),
+    html[data-s4tm-clean="1"] [class*="recharge-panel"]:not([data-s4tm]),
+    html[data-s4tm-clean="1"] [class*="noble-panel"]:not([data-s4tm]) {
       display: none !important;
     }
 
@@ -388,6 +398,41 @@
 
   /* ---------- 工具 ---------- */
 
+  /** 原生 API 包装标记：重复注入时不再层层代理 */
+  const PATCHED = Symbol('s4tm-patched');
+
+  /*
+   * 统一登记脚本持有的资源。油猴禁用脚本不会通知已注入实例，
+   * 所以 destroy() 只作为 debug 模式下的手动还原入口；普通用户刷新页面即可彻底回收。
+   */
+  const runtime = {
+    listeners: [],
+    timers: new Set(),
+    cleanups: new Set(),
+    restores: [],
+    disposed: false,
+  };
+
+  function on(target, type, handler, options) {
+    target.addEventListener(type, handler, options);
+    runtime.listeners.push([target, type, handler, options]);
+  }
+
+  function later(fn, delay) {
+    const id = setTimeout(() => {
+      runtime.timers.delete(id);
+      fn();
+    }, delay);
+    runtime.timers.add(id);
+    return id;
+  }
+
+  function clearLater(id) {
+    if (!id) return;
+    clearTimeout(id);
+    runtime.timers.delete(id);
+  }
+
   const log = (...args) => {
     if (CONFIG.debug) console.log(PREFIX, ...args);
   };
@@ -419,8 +464,10 @@
       function cleanup() {
         observer.disconnect();
         clearTimeout(timer);
+        runtime.cleanups.delete(cleanup);
       }
 
+      runtime.cleanups.add(cleanup);
       observer.observe(target, { childList: true, subtree: true });
     });
   }
@@ -444,6 +491,10 @@
    * @param {(url: string) => void} handler
    */
   function onUrlChange(handler) {
+    // 重复注入时不层层代理 history，也避免 destroy 后把包装又装回去
+    if (state.routePatched) return;
+    state.routePatched = true;
+
     let lastUrl = location.href;
     const fire = () => {
       if (location.href === lastUrl) return;
@@ -454,15 +505,20 @@
 
     for (const method of ['pushState', 'replaceState']) {
       const original = history[method];
-      history[method] = function patchedHistory(...args) {
+      const patched = function patchedHistory(...args) {
         const result = original.apply(this, args);
         fire();
         return result;
       };
+      history[method] = patched;
+      runtime.restores.push(() => {
+        // 只有仍是自己包装的函数才还原，不覆盖站点后续的改写
+        if (history[method] === patched) history[method] = original;
+      });
     }
 
-    window.addEventListener('popstate', fire);
-    window.addEventListener('hashchange', fire);
+    on(window, 'popstate', fire);
+    on(window, 'hashchange', fire);
   }
 
   /**
@@ -518,7 +574,7 @@
   function countBlocked() {
     state.blockedCount += 1;
     if (state.countTimer) return;
-    state.countTimer = setTimeout(() => {
+    state.countTimer = later(() => {
       state.countTimer = 0;
       updatePerfButton();
     }, CONFIG.countDebounce);
@@ -552,9 +608,9 @@
 
   function patchFetch() {
     const native = window.fetch;
-    if (typeof native !== 'function') return;
+    if (typeof native !== 'function' || native[PATCHED]) return;
 
-    window.fetch = function patchedFetch(input) {
+    const patched = function patchedFetch(input) {
       const rawUrl = typeof input === 'string'
         ? input
         : (input && typeof input.url === 'string' ? input.url : '');
@@ -564,41 +620,61 @@
       }
       return native.apply(this, arguments);
     };
+    patched[PATCHED] = true;
+    window.fetch = patched;
+    runtime.restores.push(() => {
+      if (window.fetch === patched) window.fetch = native;
+    });
   }
 
   function patchXhr() {
     const proto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
     if (!proto || typeof proto.open !== 'function' || typeof proto.send !== 'function') return;
+    if (proto.open[PATCHED] || proto.send[PATCHED]) return;
 
     const nativeOpen = proto.open;
     const nativeSend = proto.send;
 
-    proto.open = function patchedOpen(method, url, ...rest) {
+    const patchedOpen = function patchedOpen(method, url, ...rest) {
       this[XHR_SKIP] = shouldBlock(url);
       return nativeOpen.call(this, method, url, ...rest);
     };
 
-    proto.send = function patchedSend(body) {
+    const patchedSend = function patchedSend(body) {
       if (this[XHR_SKIP]) {
         countBlocked();
         return; // 静默丢弃，不触发 error 回调，站点不会打印上报失败
       }
       return nativeSend.call(this, body);
     };
+
+    patchedOpen[PATCHED] = true;
+    patchedSend[PATCHED] = true;
+    proto.open = patchedOpen;
+    proto.send = patchedSend;
+    runtime.restores.push(() => {
+      if (proto.open === patchedOpen) proto.open = nativeOpen;
+      if (proto.send === patchedSend) proto.send = nativeSend;
+    });
   }
 
   function patchBeacon() {
     const nav = window.navigator;
-    if (!nav || typeof nav.sendBeacon !== 'function') return;
+    if (!nav || typeof nav.sendBeacon !== 'function' || nav.sendBeacon[PATCHED]) return;
 
     const native = nav.sendBeacon;
-    nav.sendBeacon = function patchedBeacon(url, data) {
+    const patched = function patchedBeacon(url, data) {
       if (shouldBlock(url)) {
         countBlocked();
         return true; // 告诉调用方已排队，避免它退回 new Image 再发一次
       }
       return native.call(nav, url, data);
     };
+    patched[PATCHED] = true;
+    nav.sendBeacon = patched;
+    runtime.restores.push(() => {
+      if (nav.sendBeacon === patched) nav.sendBeacon = native;
+    });
   }
 
   /** 虎牙的启动 / 点击埋点是 (new Image).src = url，必须拦 setter 才有效 */
@@ -607,19 +683,26 @@
     if (!proto) return;
 
     const desc = Object.getOwnPropertyDescriptor(proto, 'src');
-    if (!desc || !desc.set || !desc.configurable) return;
+    if (!desc || !desc.set || !desc.configurable || desc.set[PATCHED]) return;
+
+    const patchedSet = function (value) {
+      if (shouldBlock(String(value))) {
+        countBlocked();
+        return;
+      }
+      desc.set.call(this, value);
+    };
+    patchedSet[PATCHED] = true;
 
     Object.defineProperty(proto, 'src', {
       configurable: true,
       enumerable: desc.enumerable,
       get: desc.get,
-      set(value) {
-        if (shouldBlock(String(value))) {
-          countBlocked();
-          return;
-        }
-        desc.set.call(this, value);
-      },
+      set: patchedSet,
+    });
+    runtime.restores.push(() => {
+      const current = Object.getOwnPropertyDescriptor(proto, 'src');
+      if (current?.set === patchedSet) Object.defineProperty(proto, 'src', desc);
     });
   }
 
@@ -721,12 +804,35 @@
     }
   }
 
-  /** 房间切流 / 标题异步回填时同步顶栏，回调只做一次文本比对，不产生日志 */
-  function watchRoomMeta() {
-    const titleEl = document.getElementById('J_roomTitle');
-    if (!titleEl) return;
+  /**
+   * 房间切流 / 标题异步回填时同步顶栏。观察器只留一份、可重建、可注销，
+   * 回调先防抖再读 DOM，避免标题子树高频变动时反复全文档查询。
+   */
+  async function watchRoomMeta() {
+    // 并发调用（mount 与路由回调撞车）只保留最后一次，避免建出多个观察者
+    const generation = ++state.metaGeneration;
+    state.metaObserver?.disconnect();
+    state.metaObserver = null;
+    clearLater(state.metaTimer);
+    state.metaTimer = 0;
 
-    const observer = new MutationObserver(() => updateBarText());
+    let titleEl;
+    try {
+      titleEl = await waitFor('#J_roomTitle');
+    } catch (err) {
+      log('房间标题节点未出现，顶栏标题不自动刷新', err.message);
+      return;
+    }
+    if (runtime.disposed || generation !== state.metaGeneration || !titleEl.isConnected) return;
+
+    const observer = new MutationObserver(() => {
+      clearLater(state.metaTimer);
+      state.metaTimer = later(() => {
+        state.metaTimer = 0;
+        updateBarText();
+      }, CONFIG.metaDebounce);
+    });
+
     observer.observe(titleEl, {
       childList: true,
       subtree: true,
@@ -734,9 +840,22 @@
       attributes: true,
       attributeFilter: ['title'],
     });
+    state.metaObserver = observer;
+    updateBarText();
   }
 
   function createBar() {
+    // 并发 mount 竞态的兜底：已有工具条就复用，不建第二个同 id 节点
+    const existing = document.getElementById(BAR_ID);
+    if (existing) {
+      state.bar = existing;
+      state.perfToggle = existing.querySelector('.s4tm-toggle--perf');
+      state.toggle = existing.querySelector('.s4tm-toggle:not(.s4tm-toggle--perf)');
+      updateBarText();
+      updatePerfButton();
+      return;
+    }
+
     const bar = document.createElement('div');
     bar.id = BAR_ID;
     bar.setAttribute('data-s4tm', 'toolbar');
@@ -754,13 +873,13 @@
     perfToggle.type = 'button';
     perfToggle.className = 's4tm-toggle s4tm-toggle--perf';
     perfToggle.setAttribute('data-s4tm', 'perf-toggle');
-    perfToggle.addEventListener('click', () => setPerfEnabled(!state.perfEnabled));
+    on(perfToggle, 'click', () => setPerfEnabled(!state.perfEnabled));
 
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 's4tm-toggle';
     toggle.setAttribute('data-s4tm', 'toggle');
-    toggle.addEventListener('click', () => setEnabled(!state.enabled));
+    on(toggle, 'click', () => setEnabled(!state.enabled));
 
     bar.append(room, anchor, hint, perfToggle, toggle);
     (document.body || document.documentElement).appendChild(bar);
@@ -784,35 +903,84 @@
   }
 
   async function mount() {
-    // 幂等：SPA 路由回到直播间时不重复注入工具条
-    if (state.mounted || document.getElementById(BAR_ID)) return;
+    // awaiting 之前先占位，避免等待 .room-core 的十几秒里并发注入两个工具条
+    if (state.mounted || state.mounting || document.getElementById(BAR_ID)) return;
     if (!looksLikeRoom()) {
       log('非直播间路径，跳过');
       return;
     }
 
-    // 样式里的规则都带 html[data-s4tm-clean] 前缀，未确认页面前不会生效
-    injectStyle(STYLE_ID, CLEAN_CSS);
-
+    state.mounting = true;
     try {
+      // 样式里的规则都带 html[data-s4tm-clean] 前缀，未确认页面前不会生效
+      injectStyle(STYLE_ID, CLEAN_CSS);
       await waitFor(ROOM_SELECTOR);
+
+      // await 期间可能已有另一次 mount 完成，或脚本已被卸载
+      if (runtime.disposed || state.mounted || document.getElementById(BAR_ID)) return;
+
+      state.mounted = true;
+      createBar();
+      setEnabled(store.get('cleanMode', true) !== false);
+      watchRoomMeta().catch((err) => warn('房间标题监听失败', err));
+      log('挂载完成');
     } catch (err) {
       warn('未识别到直播间结构，本次跳过', err.message);
-      return;
+    } finally {
+      state.mounting = false;
     }
-
-    state.mounted = true;
-    createBar();
-    watchRoomMeta();
-    setEnabled(store.get('cleanMode', true) !== false);
-    log('挂载完成');
   }
 
   /* ---------- 启动 ---------- */
 
+  /**
+   * 一次性回收全部资源：注销监听、断开观察者、清定时器、还原被包装的原生 API，
+   * 移除注入节点与清爽模式属性。禁用脚本不会自动触发它，debug 模式下手动调用。
+   */
+  function destroy() {
+    if (runtime.disposed) return;
+    runtime.disposed = true;
+
+    for (const [target, type, handler, options] of runtime.listeners) {
+      target.removeEventListener(type, handler, options);
+    }
+    runtime.listeners.length = 0;
+
+    state.metaGeneration += 1;
+    state.metaObserver?.disconnect();
+    state.metaObserver = null;
+    clearLater(state.metaTimer);
+    clearLater(state.countTimer);
+    state.metaTimer = 0;
+    state.countTimer = 0;
+
+    for (const id of runtime.timers) clearTimeout(id);
+    runtime.timers.clear();
+    for (const cleanup of runtime.cleanups) cleanup();
+    runtime.cleanups.clear();
+    for (const restore of runtime.restores) restore();
+    runtime.restores.length = 0;
+
+    document.documentElement.removeAttribute(CLEAN_ATTR);
+    document.getElementById(STYLE_ID)?.remove();
+    document.getElementById(BAR_ID)?.remove();
+    state.bar = null;
+    state.toggle = null;
+    state.perfToggle = null;
+    state.mounted = false;
+    state.mounting = false;
+    state.routePatched = false;
+
+    if (CONFIG.debug && window.__S4TM__) delete window.__S4TM__;
+    log('已卸载');
+  }
+
   function main() {
     const safeMount = () => {
       mount().catch((err) => warn('挂载失败', err));
+    };
+    const safeMeta = () => {
+      watchRoomMeta().catch((err) => warn('房间标题监听失败', err));
     };
 
     // 网络拦截必须在页面脚本执行前安装，且只在直播间 URL 生效
@@ -832,13 +1000,18 @@
         installGuardOnce();
         safeMount();
         resumeCleanMode();
-        updateBarText();
+        safeMeta(); // SPA 切房间会替换标题节点，重新绑定观察器
       });
-      document.addEventListener('keydown', onKeyDown, true);
+      on(document, 'keydown', onKeyDown, true);
     } catch (err) {
       warn('初始化失败', err);
     }
   }
 
   main();
+
+  // 2.2 只允许一个调试接口，且默认不启用
+  if (CONFIG.debug) {
+    window.__S4TM__ = { destroy };
+  }
 })();

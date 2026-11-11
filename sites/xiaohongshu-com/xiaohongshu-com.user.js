@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 小红书 · 笔记原图批量下载
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/xiaohongshu-com
-// @version      0.1.0
+// @version      0.1.1
 // @description  小红书笔记页一键打包下载全部图片，自动取 CDN 原始尺寸、去掉压缩与水印参数
 // @author       KeyValue666
 // @match        https://www.xiaohongshu.com/*
@@ -47,6 +47,16 @@
     refreshDebounce: 160,
     /** 逐张保存的间隔，避免浏览器把多次下载合并拦截 */
     saveInterval: 320,
+    /** 一次最多处理的图片数，与 DOM 降级路径一致，防止超大图集撑爆内存 */
+    maxImages: 30,
+    /** 单次下载的原始字节总预算，超过就跳过后续图片 */
+    maxTotalBytes: 120 * 1024 * 1024,
+    /** CRC 计算分片大小，每片后让出主线程 */
+    crcChunkBytes: 512 * 1024,
+    /** ZIP 拼装每累计多少字节让出一次主线程 */
+    zipYieldBytes: 4 * 1024 * 1024,
+    /** 下载落盘是异步的，留短暂宽限期再释放 Blob */
+    revokeDelay: 3000,
   };
 
   const DEFAULTS = {
@@ -65,12 +75,61 @@
 
   /* ---------- 工具 ---------- */
 
+  /** 原生 API 包装标记，重复注入时不层层代理 */
+  const PATCHED = Symbol('s4tm-patched');
+
+  /*
+   * 统一登记脚本持有的资源。油猴禁用脚本不会通知已注入实例，
+   * destroy() 只作为 debug 模式下的手动还原入口；普通用户刷新页面即可彻底回收。
+   */
+  const runtime = {
+    listeners: [],
+    timers: new Set(),
+    cleanups: new Set(),
+    restores: [],
+    objectUrls: new Set(),
+    controllers: new Set(),
+    routePatched: false,
+    disposed: false,
+  };
+
+  function on(target, type, handler, options) {
+    target.addEventListener(type, handler, options);
+    runtime.listeners.push([target, type, handler, options]);
+  }
+
+  function later(fn, delayMs) {
+    const id = setTimeout(() => {
+      runtime.timers.delete(id);
+      fn();
+    }, delayMs);
+    runtime.timers.add(id);
+    return id;
+  }
+
+  function clearLater(id) {
+    if (!id) return;
+    clearTimeout(id);
+    runtime.timers.delete(id);
+  }
+
+  /** 大计算分片之间让出主线程，避免打包时整页卡住 */
+  function yieldToBrowser() {
+    return new Promise((resolve) => {
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(() => resolve(), { timeout: 50 });
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
+  }
+
   const log = (...args) => {
     if (CONFIG.debug) console.log(PREFIX, ...args);
   };
   const warn = (...args) => console.warn(PREFIX, ...args);
 
-  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const delay = (ms) => new Promise((resolve) => { later(resolve, ms); });
 
   /**
    * 等待元素出现：用 MutationObserver，不靠猜时间。
@@ -98,8 +157,10 @@
       function cleanup() {
         observer.disconnect();
         clearTimeout(timer);
+        runtime.cleanups.delete(cleanup);
       }
 
+      runtime.cleanups.add(cleanup);
       observer.observe(target, { childList: true, subtree: true });
     });
   }
@@ -122,6 +183,10 @@
    * @param {(url: string) => void} handler
    */
   function onUrlChange(handler) {
+    // 重复注入时不层层代理 history，避免 pushState 被包好几层
+    if (runtime.routePatched) return;
+    runtime.routePatched = true;
+
     let lastUrl = location.href;
     const fire = () => {
       if (location.href === lastUrl) return;
@@ -132,15 +197,20 @@
 
     for (const method of ['pushState', 'replaceState']) {
       const original = history[method];
-      history[method] = function patchedHistory(...args) {
+      const patched = function patchedHistory(...args) {
         const result = original.apply(this, args);
         fire();
         return result;
       };
+      history[method] = patched;
+      runtime.restores.push(() => {
+        // 只有仍是自己包装的函数才还原，不覆盖站点后续改写
+        if (history[method] === patched) history[method] = original;
+      });
     }
 
-    window.addEventListener('popstate', fire);
-    window.addEventListener('hashchange', fire);
+    on(window, 'popstate', fire);
+    on(window, 'hashchange', fire);
   }
 
   /**
@@ -209,7 +279,8 @@
         try {
           results[index] = await worker(items[index], index);
         } catch (err) {
-          warn('单项处理失败', index, err);
+          // 取消产生的 abort 不是故障，不刷 warn
+          if (!state.cancelRequested) warn('单项处理失败', index, err);
           results[index] = null;
         }
       }
@@ -528,35 +599,72 @@
 
   /**
    * 跨域取图：优先 GM_xmlhttpRequest（不受 CORS 限制），管理器不支持时退回 fetch。
+   * signal 用于取消：GM 请求调 abort()，fetch 分支把外部 abort 转发给自己的 controller。
    * @param {string} url
+   * @param {AbortSignal} [signal]
    * @returns {Promise<Blob>}
    */
-  async function fetchBlob(url) {
+  async function fetchBlob(url, signal) {
+    if (signal?.aborted) throw new Error('已取消');
+
     if (typeof GM_xmlhttpRequest === 'function') {
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        let settled = false;
+        let request = null;
+
+        const finish = (fn, value) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', onAbort);
+          state.pendingRequests.delete(request);
+          fn(value);
+        };
+        const onAbort = () => {
+          if (settled) return;
+          request?.abort?.();
+          finish(reject, new Error('已取消'));
+        };
+
+        request = GM_xmlhttpRequest({
           method: 'GET',
           url,
           responseType: 'blob',
           timeout: CONFIG.fetchTimeout,
+          // 与 fetch 分支 credentials:'omit' 对齐，不携带目标域 Cookie
+          anonymous: true,
           headers: { Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
           onload: (res) => {
-            if (res.status >= 200 && res.status < 300 && res.response) resolve(res.response);
-            else reject(new Error(`HTTP ${res.status}`));
+            if (res.status >= 200 && res.status < 300 && res.response) {
+              finish(resolve, res.response);
+            } else {
+              finish(reject, new Error(`HTTP ${res.status}`));
+            }
           },
-          onerror: () => reject(new Error('网络错误')),
-          ontimeout: () => reject(new Error('请求超时')),
+          onerror: () => finish(reject, new Error('网络错误')),
+          ontimeout: () => finish(reject, new Error('请求超时')),
+          onabort: () => finish(reject, new Error('已取消')),
         });
+        state.pendingRequests.add(request);
+        signal?.addEventListener('abort', onAbort, { once: true });
       });
     }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), CONFIG.fetchTimeout);
+    runtime.timers.add(timer);
+    runtime.controllers.add(controller);
+    const onAbort = () => controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     try {
       const res = await fetch(url, { signal: controller.signal, credentials: 'omit' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.blob();
     } finally {
       clearTimeout(timer);
+      runtime.timers.delete(timer);
+      runtime.controllers.delete(controller);
+      signal?.removeEventListener('abort', onAbort);
     }
   }
 
@@ -620,15 +728,16 @@
    * @param {object[]} candidates 已排序的候选源
    * @returns {Promise<object|null>}
    */
-  async function resolveImage(image, probe, forceProbe, candidates) {
+  async function resolveImage(image, probe, forceProbe, candidates, signal) {
     let best = null;
     const target = image.width > 0 && image.height > 0 ? image.width * image.height : 0;
 
     for (const candidate of candidates) {
+      if (signal?.aborted) throw new Error('已取消');
       // 已经有干净原图了就没必要再取带处理参数的版本。
       if (!candidate.clean && best) break;
       try {
-        const blob = await fetchBlob(candidate.url);
+        const blob = await fetchBlob(candidate.url, signal);
         const buffer = new Uint8Array(await blob.arrayBuffer());
         if (buffer.length < 1024) continue;
         const size = await probeSize(blob);
@@ -678,6 +787,19 @@
     return (crc ^ 0xffffffff) >>> 0;
   }
 
+  /** CRC 是增量状态，分片计算不会改变结果；每片后让出主线程避免整页卡死 */
+  async function crc32Chunked(bytes) {
+    let crc = 0xffffffff;
+    for (let start = 0; start < bytes.length; start += CONFIG.crcChunkBytes) {
+      const end = Math.min(start + CONFIG.crcChunkBytes, bytes.length);
+      for (let i = start; i < end; i += 1) {
+        crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+      }
+      if (end < bytes.length) await yieldToBrowser();
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
   /** @param {Date} date @returns {{ time: number, day: number }} */
   function dosDateTime(date) {
     const time = (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1);
@@ -688,20 +810,22 @@
 
   /**
    * 手写 ZIP：图片本身已压缩，用 store 模式原样封装，避免引入外部库。
-   * @param {{ name: string, data: Uint8Array }[]} entries
-   * @returns {Blob}
+   * crc 由下载阶段分片预算好，这里只做封装；每累计一定字节让出一次主线程。
+   * @param {{ name: string, data: Uint8Array, crc?: number }[]} entries
+   * @returns {Promise<Blob>}
    */
-  function buildZip(entries) {
+  async function buildZip(entries) {
     const encoder = new TextEncoder();
     const now = dosDateTime(new Date());
     const parts = [];
     const central = [];
     let offset = 0;
+    let sliceBytes = 0;
 
     for (const entry of entries) {
       const name = encoder.encode(entry.name);
       const data = entry.data;
-      const crc = crc32(data);
+      const crc = entry.crc ?? crc32(data);
 
       const local = new Uint8Array(30 + name.length);
       const lv = new DataView(local.buffer);
@@ -734,6 +858,12 @@
       cd.set(name, 46);
       central.push(cd);
       offset += local.length + data.length;
+
+      sliceBytes += data.length;
+      if (sliceBytes >= CONFIG.zipYieldBytes) {
+        sliceBytes = 0;
+        await yieldToBrowser();
+      }
     }
 
     const centralSize = central.reduce((sum, item) => sum + item.length, 0);
@@ -754,7 +884,11 @@
     note: null,
     hasNoteRoot: false,
     refreshTimer: 0,
+    noteObserver: null,
     ui: null,
+    cancelRequested: false,
+    currentController: null,
+    pendingRequests: new Set(),
   };
 
   /**
@@ -764,6 +898,7 @@
    */
   function saveBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
+    runtime.objectUrls.add(url);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
@@ -771,8 +906,13 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
-    // 落盘是异步的，立刻 revoke 会让部分浏览器写出空文件。
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+    // 落盘是异步的，立刻 revoke 会让部分浏览器写出空文件；3 秒足够，
+    // 句柄登记后 destroy() 也能提前释放，不再让整包 Blob 挂 60 秒。
+    later(() => {
+      URL.revokeObjectURL(url);
+      runtime.objectUrls.delete(url);
+    }, CONFIG.revokeDelay);
   }
 
   function injectPanelStyle() {
@@ -860,6 +1000,7 @@
       .s4tm-xhs-btn--ghost { background: #fff; color: #ff2442; }
       .s4tm-xhs-btn--ghost:hover:not(:disabled) { background: #fff2f4; }
       .s4tm-xhs-btn:disabled { opacity: .55; cursor: not-allowed; }
+      .s4tm-xhs-btn[hidden] { display: none; }
       .s4tm-xhs-option {
         display: flex;
         align-items: center;
@@ -920,6 +1061,7 @@
     for (const btn of [state.ui?.zipBtn, state.ui?.eachBtn]) {
       if (btn) btn.disabled = !enabled;
     }
+    if (state.ui?.cancelBtn) state.ui.cancelBtn.hidden = enabled;
   }
 
   function renderMeta() {
@@ -953,49 +1095,96 @@
       return;
     }
 
+    const images = note.images.slice(0, CONFIG.maxImages);
+    const truncated = note.images.length > images.length;
+    const total = images.length;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    let valid = [];
+    let entries = [];
+
     state.busy = true;
+    state.cancelRequested = false;
+    state.currentController = controller;
     setButtonsEnabled(false);
-    setProgress(0, note.images.length);
-    setStatus('正在取原图…', 'info');
+    setProgress(0, total);
+    setStatus(
+      truncated
+        ? `笔记共 ${note.images.length} 张，按上限只处理前 ${total} 张；正在取原图…`
+        : '正在取原图…',
+      truncated ? 'warn' : 'info',
+    );
 
     try {
       const probe = store.get('probeQuality', DEFAULTS.probeQuality) !== false;
-      const total = note.images.length;
+      let loadedBytes = 0;
+
       // 首图把所有干净源都比一遍，确定这篇笔记哪种源返回的原始质量最高。
-      const first = await resolveImage(note.images[0], probe, probe, note.images[0].candidates);
+      const first = await resolveImage(
+        images[0], probe, probe, images[0].candidates, signal,
+      );
+      if (state.cancelRequested) throw new Error('已取消');
+      if (first) {
+        if (first.buffer.length > CONFIG.maxTotalBytes) {
+          first.buffer = null;
+          setStatus('首图已超过单次字节预算，已停止下载。', 'warn');
+          return;
+        }
+        loadedBytes += first.buffer.length;
+        // CRC 分散在下载阶段算，打包时不再逐字节重扫一遍
+        first.crc = await crc32Chunked(first.buffer);
+      }
       setProgress(1, total);
+
       // 只有干净原图的最优源才值得复用；带处理参数的兜底源不能变成后续首选。
       const preferredKind = first?.clean ? first.kind : '';
       const rest = await mapLimit(
-        note.images.slice(1),
+        images.slice(1),
         CONFIG.concurrency,
         async (image, index) => {
+          if (state.cancelRequested || loadedBytes >= CONFIG.maxTotalBytes) return null;
           const record = await resolveImage(
             image,
             probe,
             false,
             prioritize(image, preferredKind),
+            signal,
           );
           setProgress(index + 2, total);
+          if (!record || !record.buffer) return null;
+
+          // 总字节预算：超限就丢弃这张并立刻断开引用，不让它驻留到打包阶段
+          if (loadedBytes + record.buffer.length > CONFIG.maxTotalBytes) {
+            record.buffer = null;
+            return null;
+          }
+          loadedBytes += record.buffer.length;
+          record.crc = await crc32Chunked(record.buffer);
           return record;
         },
       );
-      const valid = [first, ...rest].filter((record) => record && record.buffer);
+
+      if (state.cancelRequested) throw new Error('已取消');
+      valid = [first, ...rest].filter((record) => record && record.buffer);
       if (valid.length === 0) {
         setStatus('全部取图失败：检查网络、登录态，以及脚本管理器的跨域授权。', 'warn');
         return;
       }
 
       const base = sanitize(note.title || note.id || '小红书笔记');
-      const entries = valid.map((record, index) => ({
+      entries = valid.map((record, index) => ({
         name: `${base}_${String(index + 1).padStart(2, '0')}.${record.ext}`,
         data: record.buffer,
+        crc: record.crc,
       }));
 
       if (mode === 'zip') {
-        saveBlob(buildZip(entries), `${base}_原图.zip`);
+        const zip = await buildZip(entries);
+        if (state.cancelRequested) throw new Error('已取消');
+        saveBlob(zip, `${base}_原图.zip`);
       } else {
         for (const entry of entries) {
+          if (state.cancelRequested) break;
           saveBlob(new Blob([entry.data], { type: 'application/octet-stream' }), entry.name);
           await delay(CONFIG.saveInterval);
         }
@@ -1013,16 +1202,32 @@
       const notes = [];
       if (failed > 0) notes.push(`${failed} 张失败`);
       if (degraded > 0) notes.push(`${degraded} 张只取到带处理参数的版本`);
+      if (loadedBytes >= CONFIG.maxTotalBytes) {
+        notes.push(`已达 ${Math.round(CONFIG.maxTotalBytes / 1048576)}MB 单次预算，后续图片未下载`);
+      }
       setStatus(
         `完成：${valid.length} 张已${mode === 'zip' ? '打包' : '逐张'}下载，${sizeText}`
         + `${notes.length ? `；${notes.join('，')}` : ''}。`,
         failed > 0 || degraded > 0 ? 'warn' : 'ok',
       );
     } catch (err) {
-      warn('下载失败', err);
-      setStatus(`下载失败：${err.message}`, 'warn');
+      if (state.cancelRequested) {
+        setStatus('已取消下载。', 'warn');
+      } else {
+        warn('下载失败', err);
+        setStatus(`下载失败：${err.message}`, 'warn');
+      }
     } finally {
+      // 不等 GC 猜时机：打包用的 Blob 已生成，立刻断开对所有图片 buffer 的引用
+      for (const entry of entries) entry.data = null;
+      entries.length = 0;
+      for (const record of valid) record.buffer = null;
+      valid.length = 0;
+
       state.busy = false;
+      state.cancelRequested = false;
+      state.currentController = null;
+      state.pendingRequests.clear();
       setButtonsEnabled(true);
     }
   }
@@ -1061,6 +1266,8 @@
 
     const zipBtn = createButton('s4tm-xhs-btn', '打包下载 ZIP');
     const eachBtn = createButton('s4tm-xhs-btn s4tm-xhs-btn--ghost', '逐张保存');
+    const cancelBtn = createButton('s4tm-xhs-btn s4tm-xhs-btn--ghost', '取消下载');
+    cancelBtn.hidden = true;
 
     const option = document.createElement('label');
     option.className = 's4tm-xhs-option';
@@ -1082,7 +1289,7 @@
     status.className = 's4tm-xhs-status';
     status.textContent = '只下载当前这篇笔记的图片，全部在本地处理。';
 
-    card.append(head, title, meta, zipBtn, eachBtn, option, progress, status);
+    card.append(head, title, meta, zipBtn, eachBtn, cancelBtn, option, progress, status);
 
     const fab = createButton('s4tm-xhs-fab', '原图下载');
     const count = document.createElement('span');
@@ -1094,22 +1301,27 @@
     document.body.appendChild(host);
 
     state.ui = {
-      host, card, fab, count, title, meta, zipBtn, eachBtn,
+      host, card, fab, count, title, meta, zipBtn, eachBtn, cancelBtn,
       checkbox, progress: progressFill, status,
     };
 
-    fab.addEventListener('click', () => {
+    on(fab, 'click', () => {
       card.hidden = !card.hidden;
       if (!card.hidden) refresh();
     });
-    close.addEventListener('click', () => { card.hidden = true; });
-    zipBtn.addEventListener('click', () => {
+    on(close, 'click', () => { card.hidden = true; });
+    on(zipBtn, 'click', () => {
       downloadAll('zip').catch((err) => warn('下载异常', err));
     });
-    eachBtn.addEventListener('click', () => {
+    on(eachBtn, 'click', () => {
       downloadAll('each').catch((err) => warn('下载异常', err));
     });
-    checkbox.addEventListener('change', () => {
+    on(cancelBtn, 'click', () => {
+      state.cancelRequested = true;
+      state.currentController?.abort();
+      setStatus('正在取消…', 'warn');
+    });
+    on(checkbox, 'change', () => {
       store.set('probeQuality', checkbox.checked);
       setStatus(
         checkbox.checked ? '已开启多源择优。' : '已关闭多源择优，只取第一个可用源。',
@@ -1118,21 +1330,82 @@
     });
   }
 
-  /** 笔记弹窗常在不改 URL 的情况下打开，用轻量观察 + 防抖刷新计数。 */
+  /** 笔记弹窗常在不改 URL 的情况下打开；回调节流，重活放到防抖任务里。 */
   function observeNoteRoot() {
+    if (state.noteObserver) return;
+    let lastCheck = 0;
+
     const observer = new MutationObserver((mutations) => {
       const changed = mutations.some((item) => item.addedNodes.length || item.removedNodes.length);
       if (!changed) return;
+
+      // 无限滚动会持续派发 DOM 变动，最多每 refreshDebounce 毫秒做一次全文档查询。
+      // 用节流而非每次都重置防抖，避免高频变动下 refresh() 永远排不上队。
+      const now = Date.now();
+      if (now - lastCheck < CONFIG.refreshDebounce) return;
+      lastCheck = now;
+
       const hasNote = !!document.querySelector(NOTE_ROOT_SELECTOR);
       if (hasNote === state.hasNoteRoot) return;
       state.hasNoteRoot = hasNote;
-      clearTimeout(state.refreshTimer);
-      state.refreshTimer = setTimeout(refresh, CONFIG.refreshDebounce);
+      clearLater(state.refreshTimer);
+      state.refreshTimer = later(() => {
+        state.refreshTimer = 0;
+        refresh();
+      }, CONFIG.refreshDebounce);
     });
+
     observer.observe(document.documentElement, { childList: true, subtree: true });
+    state.noteObserver = observer;
   }
 
   /* ---------- 启动 ---------- */
+
+  /**
+   * 一次性回收全部资源：注销监听、断开观察者、清定时器、还原 history、
+   * 取消在途请求、释放 objectURL、移除注入节点。禁用脚本不会自动触发它。
+   */
+  function destroy() {
+    if (runtime.disposed) return;
+    runtime.disposed = true;
+
+    for (const [target, type, handler, options] of runtime.listeners) {
+      target.removeEventListener(type, handler, options);
+    }
+    runtime.listeners.length = 0;
+
+    state.noteObserver?.disconnect();
+    state.noteObserver = null;
+    clearLater(state.refreshTimer);
+    state.refreshTimer = 0;
+
+    // 取消在途下载，让 downloadAll 的 finally 有机会释放 buffer
+    state.cancelRequested = true;
+    state.currentController?.abort();
+    for (const request of state.pendingRequests) request?.abort?.();
+    state.pendingRequests.clear();
+    for (const controller of runtime.controllers) controller.abort();
+
+    for (const id of runtime.timers) clearTimeout(id);
+    runtime.timers.clear();
+    runtime.controllers.clear();
+    for (const cleanup of runtime.cleanups) cleanup();
+    runtime.cleanups.clear();
+    for (const restore of runtime.restores) restore();
+    runtime.restores.length = 0;
+    for (const url of runtime.objectUrls) URL.revokeObjectURL(url);
+    runtime.objectUrls.clear();
+
+    document.getElementById(PANEL_ID)?.remove();
+    document.getElementById(`s4tm-${SITE_KEY}-style`)?.remove();
+    runtime.routePatched = false;
+    state.ui = null;
+    state.note = null;
+    state.busy = false;
+
+    if (CONFIG.debug && window.__S4TM__) delete window.__S4TM__;
+    log('已卸载');
+  }
 
   async function mount() {
     if (document.getElementById(PANEL_ID)) {
@@ -1163,4 +1436,9 @@
   }
 
   main();
+
+  // 2.2 只允许一个调试接口，且默认不启用
+  if (CONFIG.debug) {
+    window.__S4TM__ = { destroy };
+  }
 })();

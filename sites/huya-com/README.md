@@ -5,7 +5,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 脚本文件 | [`huya-com.user.js`](./huya-com.user.js) |
-| 当前版本 | `0.2.0` |
+| 当前版本 | `0.2.1` |
 | 适配域名 | `https://www.huya.com/*` |
 | 脚本管理器 | Tampermonkey 5.x / Violentmonkey 2.x |
 | 安装 | [点击安装](https://raw.githubusercontent.com/KeyValue666/script4tampermonkey/main/sites/huya-com/huya-com.user.js) |
@@ -63,6 +63,7 @@
 - `performance-report` 与 Sentry SDK 脚本本身仍会加载，并在页面挂自己的 MutationObserver 收集性能数据。油猴脚本无法在 HTML 解析阶段阻止同步 script 执行，只能掐掉它们发出的上报请求；要彻底去掉这层开销得用浏览器扩展级别的请求拦截。
 - 黑名单只列已核对过的明确域名，虎牙新增其它上报域不会自动识别。按 `Alt + P` 可立刻全部放行，再提 issue 补名单。
 - 被拦的 XHR 是静默丢弃，不触发站点的 error 回调；个别站点代码若硬等回调可能停在那一步。遇到功能异常先按 `Alt + P` 确认是不是拦截导致。
+- **禁用脚本后需刷新页面**：油猴禁用脚本不会通知已注入实例，脚本无法自动卸载。所有监听器、观察者与原生 API 包装已集中登记并可还原，调试时把 `CONFIG.debug` 改为 `true`，在控制台执行 `__S4TM__.destroy()` 即可主动还原；普通用户刷新一次页面即可彻底回收。
 
 ## 变更记录
 
@@ -79,6 +80,7 @@
 - 0.1.0 用 `padding-top: 56.25%` 撑出 16:9，宽屏下高度小于视口，余下部分露出深色页面背景（用户反馈的「下方黑色留白」）。0.1.1 改为 `height: calc(100vh - 36px)`，弹幕栏 `.room-core-r` 的 `height: 100%` 会同步铺满。
 - 0.2.0 的网络守卫在 `document-start` 替换页面原生的 `fetch`、`XHR.prototype.open/send`、`navigator.sendBeacon`、`HTMLImageElement.prototype.src`。这是对规范 2.7「禁止改写站点全局变量」的**必要偏离**：油猴脚本没有浏览器扩展的请求拦截权限，不替换这些原生方法就拦不到页面请求；替换的只是方法引用，不改站点业务变量、不碰 DOM 结构、不覆盖样式。每个 patch 独立 `try/catch`，某个 API 被抢占不会带崩其它功能。
 - `fetch` 命中黑名单时返回可解析的空 JSON 响应（`{}`），否则站点的 `await` 链会永久挂起；XHR 命中时静默不发送，避免触发站点 error 回调刷日志。计数写按钮文案走 400ms 防抖。
+- 0.2.1 把所有资源集中登记在 `runtime`：`on()` 登记监听器、`later()` 登记定时器、各 patch 把原始引用压入 `runtime.restores`、`destroy()` 一次性还原。`PATCHED` Symbol 防止重复注入时层层代理；`watchRoomMeta()` 用 generation 号防止 mount 与路由回调并发建出多个观察器；标题观察回调走 150ms 防抖。
 
 **选择器依赖**
 

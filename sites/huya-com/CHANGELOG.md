@@ -1,5 +1,19 @@
 # 变更记录
 
+## [0.2.1] - 2026-11-11
+
+### 修复
+
+- 修复 `mount()` 并发竞态：幂等检查原本在 `await waitFor('.room-core')` 之前，SPA 切房间时可能注入两个同 id 工具条。改为 `state.mounting` 占位 + await 后二次检查，`createBar()` 也加 id 复用兜底。
+- 修复房间标题观察器：原来把 `MutationObserver` 存成局部变量、永不注销、标题节点异步渲染失败就永久装不上。改为存进 `state`、重建前先 `disconnect()`、用 `waitFor()` 等待标题节点、并发调用按 generation 只保留最后一次；回调加 150ms 防抖，不再每次子树变动都全文档查询。
+- 原生 API 包装补还原路径：记录 `fetch` / `XHR.open/send` / `sendBeacon` / `img.src` setter / `history.pushState/replaceState` 的原始引用，用 `PATCHED` Symbol 防重复包裹，`destroy()` 按引用比对还原，不覆盖站点后续改写。
+- 补统一资源登记与 `destroy()` 调试接口：监听器、观察者、定时器、`waitFor` 清理器、注入节点与 `data-s4tm-clean` 属性集中回收；`debug` 模式下可在控制台调用 `__S4TM__.destroy()`。
+- 动态礼物 / 充值面板的 CSS 规则补 `:not([data-s4tm])` 排除脚本自建节点，注释如实说明这些是子串匹配而非明确类名。
+
+### 变更
+
+- 标题观察从「回调直接读 DOM」改为防抖后读，符合 CONVENTIONS 2.11；`countBlocked()` 的防抖定时器纳入统一登记。
+
 ## [0.2.0] - 2026-11-10
 
 ### 新增
