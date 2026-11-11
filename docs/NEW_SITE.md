@@ -78,4 +78,4 @@ git add sites/<site-key> README.md
 git commit -m "feat(<site-key>): <一句话功能>"
 ```
 
-提交前跑一遍 CONVENTIONS 6.4 的 DoD 清单。
+提交前先按 CONVENTIONS 6.5 做编码后 review（内存与本机性能），再逐条核对 6.4 的 DoD 清单。
