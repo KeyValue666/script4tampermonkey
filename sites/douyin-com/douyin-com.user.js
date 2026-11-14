@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 抖音网页版 · 清爽省流
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/douyin-com
-// @version      0.1.1
+// @version      0.1.5
 // @description  刷视频去广告与营销弹窗、看直播只留画面和弹幕，并拦截埋点广告请求与预加载开销
 // @author       KeyValue666
 // @match        https://www.douyin.com/*
@@ -48,6 +48,8 @@
     cacheLimit: 600,
     /** 超过这个长度的 XHR 响应不缓存，避免大字符串长期挂在实例上 */
     maxCachedResponse: 256 * 1024,
+    /** 避让测量的最小间隔（毫秒）：弹幕高频插入时不能每批都量一次全文档 */
+    avoidThrottle: 400,
     /** 屏蔽浏览器通知权限请求与通知实例：推送广告 */
     blockPush: true,
     /** 移除纯预取 link[rel=prefetch]，不影响当前播放 */
@@ -150,36 +152,114 @@
     'video', '[data-e2e]', '[role="dialog"]', 'a[href]',
   ].join(',');
 
+  /** 评论框、弹幕发言框与发送按钮：工具条必须给它们让位 */
+  const INTERACTIVE_SELECTOR = [
+    'input:not([type="hidden"])',
+    'textarea',
+    '[contenteditable="true"]',
+    '[role="textbox"]',
+    '[data-e2e="chat-send-btn"]',
+    '[data-e2e="comment-send"]',
+  ].join(',');
+
+  /** 工具条默认底距，自动避让时用它构造虚拟矩形 */
+  const BAR_DEFAULT_BOTTOM = 12;
+
+  /** 内联 SVG，不加载外部资源 */
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  /** 盾牌 + 勾：对应「拦截 / 防护已开启」，用作折叠态圆点图标 */
+  const SHIELD_PATHS = [
+    'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
+    'M9 12l2 2 4-4',
+  ];
+  /** 双右箭头：展开态的「收起」图标 */
+  const CHEVRON_PATHS = ['M7 6l6 6-6 6', 'M14 6l6 6-6 6'];
+
   const CLEAN_CSS = `
+    /* 卡片式工具条：标题 / 统计 / 2×2 开关，不再一字排开 */
     #s4tm-douyin-com-bar {
+      box-sizing: border-box;
       position: fixed;
       right: 12px;
       bottom: 12px;
       z-index: 2147483000;
       display: flex;
-      align-items: center;
-      gap: 6px;
+      flex-direction: column;
+      gap: 8px;
+      width: 220px;
       max-width: calc(100vw - 24px);
-      padding: 6px 9px;
-      border-radius: 10px;
-      background: rgba(22, 24, 30, 0.92);
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 14px;
+      background: rgba(20, 22, 28, 0.94);
       color: #f2f3f5;
       font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI",
         "Microsoft YaHei", sans-serif;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42);
       user-select: none;
+      cursor: grab;
     }
 
-    #s4tm-douyin-com-bar .s4tm-stat {
-      color: #9aa0aa;
+    #s4tm-douyin-com-bar[data-s4tm-dragging="1"] { cursor: grabbing; }
+
+    #s4tm-douyin-com-bar .s4tm-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    #s4tm-douyin-com-bar .s4tm-mark {
+      flex: none;
+      display: flex;
+      width: 20px;
+      height: 20px;
+      color: #2dd36f;
+    }
+
+    #s4tm-douyin-com-bar .s4tm-mark svg,
+    #s4tm-douyin-com-bar .s4tm-toggle--collapse svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    #s4tm-douyin-com-bar .s4tm-label {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 600;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
 
+    #s4tm-douyin-com-bar .s4tm-stat {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    #s4tm-douyin-com-bar .s4tm-stat__blocked { color: #7ff7f1; }
+    #s4tm-douyin-com-bar .s4tm-stat__ads { color: #ff9bb0; }
+
+    #s4tm-douyin-com-bar .s4tm-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+
     #s4tm-douyin-com-bar .s4tm-toggle {
-      flex: none;
-      border: 0;
-      border-radius: 6px;
-      padding: 4px 8px;
+      box-sizing: border-box;
+      min-width: 0;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      padding: 6px 8px;
       background: #2b2f3a;
       color: #f2f3f5;
       font: inherit;
@@ -190,14 +270,129 @@
 
     #s4tm-douyin-com-bar .s4tm-toggle:hover { background: #3c4252; }
 
+    /* 开启态用抖音青、关闭态压暗；前缀圆点让状态一眼可辨 */
+    #s4tm-douyin-com-bar .s4tm-grid .s4tm-toggle[aria-pressed="true"] {
+      border-color: rgba(37, 244, 238, 0.28);
+      background: rgba(37, 244, 238, 0.12);
+      color: #7ff7f1;
+    }
+
     #s4tm-douyin-com-bar .s4tm-toggle[aria-pressed="false"] {
-      background: #3a3038;
-      color: #d7a4b4;
+      background: rgba(255, 255, 255, 0.05);
+      color: #858c98;
+    }
+
+    #s4tm-douyin-com-bar .s4tm-grid .s4tm-toggle::before {
+      content: '';
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      vertical-align: 1px;
     }
 
     #s4tm-douyin-com-bar .s4tm-toggle--guard {
-      min-width: 74px;
+      min-width: 0;
       text-align: center;
+    }
+
+    #s4tm-douyin-com-bar .s4tm-toggle--collapse[aria-pressed] {
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      padding: 5px;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.06);
+      color: #c9ced8;
+    }
+
+    #s4tm-douyin-com-bar .s4tm-toggle--collapse:hover {
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    /* 图标按状态切换：展开态是收起箭头，折叠态换成盾牌 */
+    #s4tm-douyin-com-bar .s4tm-toggle--collapse .s4tm-icon--shield {
+      display: none;
+    }
+
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"]
+      .s4tm-toggle--collapse .s4tm-icon--chevron {
+      display: none;
+    }
+
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"]
+      .s4tm-toggle--collapse .s4tm-icon--shield {
+      display: block;
+    }
+
+    /* 折叠成高对比圆点：正向绿 + 白描边 + 外发光，深色页面上也能一眼看到 */
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"] {
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border: 2px solid rgba(255, 255, 255, 0.92);
+      border-radius: 50%;
+      background: #2dd36f;
+      box-shadow: 0 0 0 4px rgba(45, 211, 111, 0.22), 0 6px 18px rgba(0, 0, 0, 0.45);
+      justify-content: center;
+    }
+
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"] > :not(.s4tm-head) {
+      display: none !important;
+    }
+
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"] > .s4tm-head {
+      width: 100%;
+      height: 100%;
+      padding: 0;
+    }
+
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"]
+      > .s4tm-head > :not(.s4tm-toggle--collapse) {
+      display: none !important;
+    }
+
+    /* 带 :hover 的高特异性写法，压过通用按钮灰底 */
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"]
+      > .s4tm-head > .s4tm-toggle--collapse,
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"]
+      > .s4tm-head > .s4tm-toggle--collapse:hover {
+      width: 100%;
+      height: 100%;
+      padding: 7px;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: #fff;
+    }
+
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"] .s4tm-toggle--collapse svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* 折叠后仍显示拦截数，确认脚本还活着；不接收指针事件，免得挡住展开点击 */
+    #s4tm-douyin-com-bar[data-s4tm-collapsed="1"]::after {
+      content: attr(data-s4tm-count);
+      position: absolute;
+      top: -7px;
+      right: -9px;
+      min-width: 18px;
+      padding: 0 4px;
+      border-radius: 9px;
+      background: #fff;
+      color: #2dd36f;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 16px;
+      text-align: center;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
     }
 
     /* 站点节点只按标记隐藏；去掉 html 上的 clean 属性即可完整还原 */
@@ -251,9 +446,9 @@
       transition: none !important;
     }
 
+    /* 底距保持 12px，与自动避让的虚拟矩形基准一致 */
     @media (max-width: 720px) {
-      #s4tm-douyin-com-bar { right: 8px; bottom: 8px; flex-wrap: wrap; }
-      #s4tm-douyin-com-bar .s4tm-stat { display: none; }
+      #s4tm-douyin-com-bar { right: 8px; width: 200px; }
     }
   `;
 
@@ -270,6 +465,10 @@
     buttons: {},
     videoObserver: null,
     lastSkippedVid: '',
+    barCollapsed: false,
+    barPinned: false,
+    avoidScheduled: false,
+    lastAvoidAt: 0,
   };
 
   /* ---------- 工具 ---------- */
@@ -393,6 +592,40 @@
     if (typeof input === 'string') return input;
     if (input && typeof input.url === 'string') return input.url;
     return '';
+  }
+
+  /**
+   * 两个矩形是否相交。DOMRect 与自定义矩形都能用。
+   * @param {{ left: number, right: number, top: number, bottom: number }} a
+   * @param {{ left: number, right: number, top: number, bottom: number }} b
+   * @returns {boolean}
+   */
+  function rectsIntersect(a, b) {
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  }
+
+  /**
+   * 创建内联 SVG 图标。逐节点构造，不用 innerHTML、不加载任何外部资源。
+   * @param {string[]} paths
+   * @param {'shield'|'chevron'} variant
+   * @returns {SVGElement}
+   */
+  function makeIcon(paths, variant) {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('class', `s4tm-icon s4tm-icon--${variant}`);
+    svg.setAttribute('aria-hidden', 'true');
+    for (const d of paths) {
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    }
+    return svg;
   }
 
   /** 被拦的 fetch 必须返回可解析的响应，否则站点的 await 链会永久挂起 */
@@ -1173,6 +1406,8 @@
       const batch = pendingNodes.splice(0, CONFIG.idleBatch);
       runInspection(batch);
       scheduleSkipCheck();
+      // 走节流版：弹幕每批都变化，不能每批都做一次全文档避让测量
+      scheduleAvoid();
       if (pendingNodes.length) schedulePending();
     });
   }
@@ -1284,16 +1519,19 @@
 
   function updateBar() {
     if (!state.bar) return;
+    state.bar.setAttribute('data-s4tm-count',
+      state.blockedCount > 999 ? '999+' : String(state.blockedCount));
     const label = state.bar.querySelector('.s4tm-label');
-    const stat = state.bar.querySelector('.s4tm-stat');
+    const blockedStat = state.bar.querySelector('.s4tm-stat__blocked');
+    const adsStat = state.bar.querySelector('.s4tm-stat__ads');
     const names = { video: '视频', live: '直播', browse: '浏览' };
 
     if (label) label.textContent = `抖音 · ${names[state.mode] || '浏览'}`;
-    if (stat) {
-      stat.textContent = state.guardEnabled
-        ? `拦 ${state.blockedCount} · 去广告 ${state.adCount}`
-        : '拦截已暂停';
+    if (blockedStat) {
+      blockedStat.textContent = state.guardEnabled
+        ? `拦 ${state.blockedCount}` : '拦截已暂停';
     }
+    if (adsStat) adsStat.textContent = state.guardEnabled ? `去广告 ${state.adCount}` : '';
 
     setToggle(state.buttons.clean, state.cleanEnabled, '清爽', '原版', '清爽模式 Alt + H');
     setToggle(state.buttons.perf, state.perfEnabled, '省性能', '性能关', '预加载与特效限制 Alt + O');
@@ -1306,6 +1544,17 @@
       guard.title = state.guardEnabled
         ? `已拦 ${state.blockedCount} 个请求、剔除 ${state.adCount} 条广告，点击或 Alt + P 暂停`
         : '拦截已暂停，点击或 Alt + P 恢复';
+    }
+
+    const collapse = state.buttons.collapse;
+    if (collapse) {
+      // 图标由 CSS 按状态切换；这里写 textContent 会把 SVG 子节点清掉
+      collapse.setAttribute('aria-pressed', String(state.barCollapsed));
+      collapse.setAttribute('aria-label',
+        state.barCollapsed ? '展开工具条' : '收起工具条');
+      collapse.title = state.barCollapsed
+        ? '展开工具条（Alt + B）'
+        : '收起工具条，避免遮挡评论框 / 发言框（Alt + B）';
     }
   }
 
@@ -1331,6 +1580,216 @@
     return btn;
   }
 
+  /**
+   * 合并避让检查并做时间节流。DOM 变化批次、resize 都会调它，
+   * 不节流的话弹幕滚动时每批都要全文档 querySelectorAll + 逐元素测量。
+   * @param {boolean} [force] 用户操作（聚焦输入框 / 折叠 / 路由切换）跳过节流
+   */
+  function scheduleAvoid(force = false) {
+    if (state.avoidScheduled) return;
+    const now = typeof performance === 'object' ? performance.now() : Date.now();
+    if (!force && state.lastAvoidAt && now - state.lastAvoidAt < CONFIG.avoidThrottle) {
+      return;
+    }
+    state.avoidScheduled = true;
+    scheduleIdle(() => {
+      state.avoidScheduled = false;
+      state.lastAvoidAt = typeof performance === 'object' ? performance.now() : Date.now();
+      avoidInputs();
+    });
+  }
+
+  /**
+   * 工具条默认贴右下角，评论框与弹幕发言框正好也在那里。
+   * 判定用「默认位置」的虚拟矩形：若用当前位置，上移后会判定为不再相交又掉
+   * 回去，形成抖动。相交时把工具条底边抬到输入控件上沿之上。
+   */
+  function avoidInputs() {
+    const bar = state.bar;
+    if (!bar || state.barPinned) return;
+    const rect = bar.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const virtual = {
+      left: rect.left,
+      right: rect.right,
+      top: window.innerHeight - BAR_DEFAULT_BOTTOM - rect.height,
+      bottom: window.innerHeight - BAR_DEFAULT_BOTTOM,
+    };
+    const nodes = document.querySelectorAll(INTERACTIVE_SELECTOR);
+    const limit = Math.min(nodes.length, 60);
+    let highestTop = 0;
+    for (let i = 0; i < limit; i += 1) {
+      const box = nodes[i].getBoundingClientRect();
+      if (box.width < 8 || box.height < 8) continue;
+      if (rectsIntersect(virtual, box)) highestTop = Math.max(highestTop, box.top);
+    }
+
+    if (highestTop > 0) {
+      const maxBottom = Math.max(
+        BAR_DEFAULT_BOTTOM,
+        window.innerHeight - rect.height - BAR_DEFAULT_BOTTOM,
+      );
+      const next = Math.min(
+        maxBottom,
+        Math.ceil(window.innerHeight - highestTop) + BAR_DEFAULT_BOTTOM,
+      );
+      const value = `${next}px`;
+      if (bar.style.bottom !== value) bar.style.bottom = value;
+      if (!bar.hasAttribute('data-s4tm-avoid')) bar.setAttribute('data-s4tm-avoid', '1');
+    } else if (bar.hasAttribute('data-s4tm-avoid')) {
+      bar.style.removeProperty('bottom');
+      bar.removeAttribute('data-s4tm-avoid');
+    }
+  }
+
+  /**
+   * 折叠 / 展开工具条。折叠态只留一个 40px 高对比圆点，彻底不占输入区。
+   * @param {boolean} collapsed
+   */
+  function setBarCollapsed(collapsed) {
+    state.barCollapsed = collapsed;
+    store.set('barCollapsed', collapsed);
+    const bar = state.bar;
+    if (!bar) return;
+    if (collapsed) {
+      bar.setAttribute('data-s4tm-collapsed', '1');
+      bar.removeAttribute('data-s4tm-avoid');
+      // 用户手动拖过的位置要保留，只清自动避让写入的 bottom
+      if (!state.barPinned) bar.style.removeProperty('bottom');
+    } else {
+      bar.removeAttribute('data-s4tm-collapsed');
+    }
+    updateBar();
+    scheduleAvoid(true);
+  }
+
+  /**
+   * 拖动工具条并记住位置。拖动后关闭自动避让，双击工具条复位。
+   * pointermove 用 rAF 合并，抬手时取消未执行的帧，不留悬挂回调。
+   * @param {HTMLElement} bar
+   */
+  function enableBarDrag(bar) {
+    let dragging = false;
+    let moved = false;
+    let captured = false;
+    let pointerId = 0;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+    let nextLeft = 0;
+    let nextTop = 0;
+    let frame = 0;
+    // 尺寸在按下时取一次，pointermove 里不再读布局属性
+    let barWidth = 0;
+    let barHeight = 0;
+
+    const applyPosition = () => {
+      frame = 0;
+      bar.style.left = `${nextLeft}px`;
+      bar.style.top = `${nextTop}px`;
+      bar.style.right = 'auto';
+      bar.style.bottom = 'auto';
+    };
+
+    /**
+     * 捕获指针会把 click 重定向到工具条容器，按钮就收不到点击了。
+     * 所以按钮上按下时不捕获，确认是拖动（位移 > 3px）才补捕获。
+     * @param {number} id
+     */
+    const capturePointer = (id) => {
+      if (captured) return;
+      try {
+        bar.setPointerCapture(id);
+        captured = true;
+      } catch (err) {
+        log('指针捕获不可用');
+      }
+    };
+
+    const onPointerDown = (event) => {
+      if (event.button !== 0) return;
+      const onButton = event.target instanceof Element && event.target.closest('button');
+      const rect = bar.getBoundingClientRect();
+      dragging = true;
+      moved = false;
+      captured = false;
+      pointerId = event.pointerId;
+      barWidth = bar.offsetWidth || 160;
+      barHeight = bar.offsetHeight || 32;
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      nextLeft = rect.left;
+      nextTop = rect.top;
+      bar.setAttribute('data-s4tm-dragging', '1');
+      if (!onButton) capturePointer(pointerId);
+    };
+
+    const onPointerMove = (event) => {
+      if (!dragging) return;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+      if (!moved) return;
+      capturePointer(pointerId);
+      nextLeft = Math.max(4, Math.min(window.innerWidth - barWidth - 4, startLeft + dx));
+      nextTop = Math.max(4, Math.min(window.innerHeight - barHeight - 4, startTop + dy));
+      if (frame) return;
+      frame = requestAnimationFrame(applyPosition);
+    };
+
+    const onPointerUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      bar.removeAttribute('data-s4tm-dragging');
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      if (captured) {
+        try {
+          bar.releasePointerCapture(pointerId);
+        } catch (err) {
+          log('指针释放失败');
+        }
+        captured = false;
+      }
+      // 只是点了一下（含点击开关按钮），不改位置、不关闭自动避让
+      if (!moved) return;
+      applyPosition();
+      state.barPinned = true;
+      bar.removeAttribute('data-s4tm-avoid');
+      store.set('barPos', { left: nextLeft, top: nextTop });
+    };
+
+    const onDoubleClick = () => {
+      store.set('barPos', null);
+      state.barPinned = false;
+      for (const prop of ['left', 'top', 'right', 'bottom']) {
+        bar.style.removeProperty(prop);
+      }
+      scheduleAvoid(true);
+      log('工具条位置已复位');
+    };
+
+    /** 兜底：个别浏览器仍会把折叠圆点的 click 派发到容器而不是按钮 */
+    const onBarClick = (event) => {
+      if (event.target === bar && !moved && bar.hasAttribute('data-s4tm-collapsed')) {
+        setBarCollapsed(false);
+      }
+    };
+
+    bar.addEventListener('pointerdown', onPointerDown);
+    bar.addEventListener('pointermove', onPointerMove);
+    bar.addEventListener('pointerup', onPointerUp);
+    bar.addEventListener('pointercancel', onPointerUp);
+    bar.addEventListener('dblclick', onDoubleClick);
+    bar.addEventListener('click', onBarClick);
+  }
+
   function createBar() {
     if (document.getElementById(BAR_ID)) return;
     const bar = document.createElement('div');
@@ -1338,34 +1797,82 @@
     bar.setAttribute('data-s4tm', 'toolbar');
     bar.setAttribute('data-s4tm-mounted', '1');
 
+    const head = document.createElement('div');
+    head.className = 's4tm-head';
+    head.setAttribute('data-s4tm', 'head');
+
+    const mark = document.createElement('span');
+    mark.className = 's4tm-mark';
+    mark.setAttribute('data-s4tm', 'mark');
+    mark.appendChild(makeIcon(SHIELD_PATHS, 'shield'));
+
     const label = document.createElement('span');
     label.className = 's4tm-label';
     label.setAttribute('data-s4tm', 'label');
 
-    const stat = document.createElement('span');
+    const stat = document.createElement('div');
     stat.className = 's4tm-stat';
     stat.setAttribute('data-s4tm', 'stat');
+    const blockedStat = document.createElement('span');
+    blockedStat.className = 's4tm-stat__blocked';
+    blockedStat.setAttribute('data-s4tm', 'stat-blocked');
+    const adsStat = document.createElement('span');
+    adsStat.className = 's4tm-stat__ads';
+    adsStat.setAttribute('data-s4tm', 'stat-ads');
+    stat.append(blockedStat, adsStat);
 
     const clean = makeToggle('clean', () => toggleFlag('cleanEnabled'));
     const guard = makeToggle('guard', () => toggleFlag('guardEnabled'));
     const perf = makeToggle('perf', () => toggleFlag('perfEnabled'));
     const skip = makeToggle('skip', () => toggleFlag('skipAdsEnabled'));
+    const collapse = makeToggle('collapse', () => setBarCollapsed(!state.barCollapsed));
+    // 两个图标按折叠态切换：圆点显示盾牌，展开态显示收起箭头
+    collapse.append(
+      makeIcon(SHIELD_PATHS, 'shield'),
+      makeIcon(CHEVRON_PATHS, 'chevron'),
+    );
 
-    bar.append(label, stat, clean, guard, perf, skip);
+    const grid = document.createElement('div');
+    grid.className = 's4tm-grid';
+    grid.setAttribute('data-s4tm', 'grid');
+    grid.append(clean, guard, perf, skip);
+
+    head.append(mark, label, collapse);
+    bar.append(head, stat, grid);
     (document.body || document.documentElement).appendChild(bar);
 
+    const saved = store.get('barPos', null);
+    if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+      bar.style.left = `${saved.left}px`;
+      bar.style.top = `${saved.top}px`;
+      bar.style.right = 'auto';
+      bar.style.bottom = 'auto';
+      state.barPinned = true;
+    }
+    if (state.barCollapsed) bar.setAttribute('data-s4tm-collapsed', '1');
+
     state.bar = bar;
-    state.buttons = { clean, guard, perf, skip };
+    state.buttons = { clean, guard, perf, skip, collapse };
+    enableBarDrag(bar);
     updateBar();
+    scheduleAvoid(true);
   }
 
   function onKeyDown(event) {
     if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) return;
     const key = event.key?.toLowerCase();
-    const stateKey = HOTKEY_STATE[key];
-    if (!stateKey) return;
+    if (!key) return;
     if (event.target instanceof Element
       && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+
+    if (key === 'b') {
+      event.preventDefault();
+      setBarCollapsed(!state.barCollapsed);
+      return;
+    }
+
+    const stateKey = HOTKEY_STATE[key];
+    if (!stateKey) return;
     event.preventDefault();
     toggleFlag(stateKey);
   }
@@ -1379,6 +1886,7 @@
       state.guardEnabled = store.get('guardMode', true) !== false;
       state.perfEnabled = store.get('perfMode', true) !== false;
       state.skipAdsEnabled = store.get('skipAdsMode', true) !== false;
+      state.barCollapsed = store.get('barCollapsed', false) === true;
       installGuard();
     } catch (err) {
       warn('网络拦截初始化失败', err);
@@ -1398,8 +1906,12 @@
         state.lastSkippedVid = '';
         applyMode();
         scheduleIdle(() => runInspection([document.body || document.documentElement]));
+        scheduleAvoid(true);
       });
       document.addEventListener('keydown', onKeyDown, true);
+      // 聚焦输入框必须立刻重新避让；resize 走节流即可
+      document.addEventListener('focusin', () => scheduleAvoid(true), true);
+      window.addEventListener('resize', () => scheduleAvoid());
     } catch (err) {
       warn('初始化失败', err);
     }
