@@ -1,5 +1,31 @@
 # 变更记录
 
+## [0.3.0] - 2026-11-14
+
+### 新增
+
+- 面板可拖拽：按住「原图下载」按钮或面板标题栏拖动，直接更新 `right/bottom` 内联值并做视口钳制；拖到别处后位置持久化（`s4tm:xiaohongshu-com:position`），双击把手复位到默认位置。
+- 拖拽用 `pointer` 事件 + `setPointerCapture` 覆盖鼠标与触摸；`wasDragged()` 返回值让 fab 的 click 区分「拖动」与「点击」，关闭按钮的 `pointerdown` 已 `stopPropagation` 防止误触发拖拽。
+
+### 修复
+
+- 拖拽后面板消失：初版用 `transform: translate` 写偏移量，但面板是 `right/bottom` 定位，位移语义与坐标语义混用导致向右下拖时面板被推出视口。改为直接更新 `right/bottom`，配合视口钳制，面板不再丢失。
+
+## [0.2.0] - 2026-11-14
+
+### 新增
+
+- 视频笔记下载原片：优先取 `note.video.consumer.originVideoKey` 原画（`sns-video-bd.xhscdn.com`），拿不到再从 `note.video.media.stream` 各清晰度档按「分辨率面积 + 码率」选最优档的 `masterUrl` / `backupUrls[0]`；面板在有视频笔记时显示「下载视频」按钮，落盘为 MP4。
+- 缩略图预览与单图点选：面板内 3 列缩略图网格（用 `urlDefault` 缩略图），点选要下载的图；未勾选时默认下载全部，勾选后只下选中的图，编号仍从 01 连续。
+- 文件名带作者与作品 ID：`标题_作者_作品ID_序号`，逐段安全化并各自截断 30 字，批量下载后好归档、不串。
+
+### 变更
+
+- `@name` 由「笔记原图批量下载」改为「笔记原图视频下载」，`@description` 同步补充视频下载。
+- 笔记对象新增 `type`（`image` / `video`）与 `video`（解析结果或 null）字段；DOM 降级路径同步补齐，保持结构一致。
+- `fetchBlob` 增加可选 `accept` 参数，视频请求走 video 的 Accept 头，图片保持 image。
+- `downloadAll` 接受可选的选中图片子集，空选中回退全选。
+
 ## [0.1.1] - 2026-11-11
 
 ### 修复

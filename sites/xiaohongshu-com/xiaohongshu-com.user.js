@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         S4TM · 小红书 · 笔记原图批量下载
+// @name         S4TM · 小红书 · 笔记原图视频下载
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/xiaohongshu-com
-// @version      0.1.1
-// @description  小红书笔记页一键打包下载全部图片，自动取 CDN 原始尺寸、去掉压缩与水印参数
+// @version      0.3.0
+// @description  小红书笔记页一键打包下载全部图片、下载视频，自动取 CDN 原始尺寸、去掉压缩与水印参数，面板可拖拽
 // @author       KeyValue666
 // @match        https://www.xiaohongshu.com/*
 // @match        https://xiaohongshu.com/*
@@ -245,6 +245,108 @@
   };
 
   /**
+   * 让面板整体可拖拽（规范 2.6.1）。面板用 right/bottom 定位，
+   * 拖拽直接更新 right/bottom 内联值，保持「贴边 + card 向上展开」的锚定语义。
+   * 位置持久化到 store，双击把手复位到默认位置。
+   * @param {Element} el 面板根节点
+   * @param {{ handle?: Element }} [options] handle：拖拽把手，缺省整面板可拖
+   */
+  function makeDraggable(el, { handle } = {}) {
+    const dragTarget = handle || el;
+    const PAD = 8;
+    let startX = 0;
+    let startY = 0;
+    let startRight = 0;
+    let startBottom = 0;
+    let dragging = false;
+    let moved = false;
+
+    // 默认位置 = 当前 CSS 生效的 right/bottom（窄屏 CSS 可能是 12px）。
+    function readDefaults() {
+      const cs = window.getComputedStyle(el);
+      const right = parseFloat(cs.right);
+      const bottom = parseFloat(cs.bottom);
+      return {
+        right: Number.isFinite(right) ? right : 20,
+        bottom: Number.isFinite(bottom) ? bottom : 24,
+      };
+    }
+
+    function clampRightBottom(right, bottom) {
+      const rect = el.getBoundingClientRect();
+      const maxRight = Math.max(PAD, window.innerWidth - rect.width - PAD);
+      const maxBottom = Math.max(PAD, window.innerHeight - rect.height - PAD);
+      return {
+        right: Math.min(Math.max(right, PAD), maxRight),
+        bottom: Math.min(Math.max(bottom, PAD), maxBottom),
+      };
+    }
+
+    function apply(right, bottom) {
+      const pos = clampRightBottom(right, bottom);
+      el.style.right = `${pos.right}px`;
+      el.style.bottom = `${pos.bottom}px`;
+    }
+
+    const defaults = readDefaults();
+    // 恢复上次位置；没有则保持当前（默认）位置。
+    const saved = store.get('position', null);
+    if (saved && typeof saved.right === 'number' && typeof saved.bottom === 'number') {
+      apply(saved.right, saved.bottom);
+    }
+
+    function reset() {
+      apply(defaults.right, defaults.bottom);
+      store.set('position', { right: defaults.right, bottom: defaults.bottom });
+    }
+
+    on(dragTarget, 'pointerdown', (event) => {
+      if (event.button !== 0 && event.pointerType === 'mouse') return;
+      dragging = true;
+      moved = false;
+      startX = event.clientX;
+      startY = event.clientY;
+      const cs = window.getComputedStyle(el);
+      startRight = parseFloat(cs.right) || defaults.right;
+      startBottom = parseFloat(cs.bottom) || defaults.bottom;
+      dragTarget.setPointerCapture?.(event.pointerId);
+      el.style.userSelect = 'none';
+      el.style.touchAction = 'none';
+    });
+
+    on(dragTarget, 'pointermove', (event) => {
+      if (!dragging) return;
+      moved = true;
+      // 向右拖 dx>0 → right 减小；向上拖 dy<0 → bottom 增大。
+      apply(startRight - (event.clientX - startX), startBottom - (event.clientY - startY));
+    });
+
+    const end = () => {
+      if (!dragging) return;
+      dragging = false;
+      dragTarget.releasePointerCapture?.();
+      el.style.userSelect = '';
+      el.style.touchAction = '';
+      // 拖出一定距离才算拖动，避免把「点击」误判成「拖动」。
+      if (moved) {
+        const cs = window.getComputedStyle(el);
+        store.set('position', {
+          right: Math.round(parseFloat(cs.right)),
+          bottom: Math.round(parseFloat(cs.bottom)),
+        });
+      }
+    };
+
+    on(dragTarget, 'pointerup', end);
+    on(dragTarget, 'pointercancel', end);
+    // 双击把手复位位置，避免拖丢后找不回。
+    on(dragTarget, 'dblclick', reset);
+
+    // 供调用方在 click 处理里区分「拖了一下」和「点了一下」。
+    return () => moved;
+  }
+
+  /**
    * 站点是 Vue SSR，状态里的数组 / 对象可能被 ref 包了几层。
    * @param {*} value
    * @returns {*}
@@ -297,6 +399,20 @@
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 60) || '小红书笔记';
+  }
+
+  /**
+   * 拼文件基名：标题 + 作者 + 作品 ID，逐段安全化后拼装，任一段为空自动跳过。
+   * 三段都截断到 30 字，避免单个字段占满文件名长度。
+   * @param {object} note
+   * @returns {string}
+   */
+  function buildBaseName(note) {
+    const parts = [];
+    if (note.title) parts.push(sanitize(note.title).slice(0, 30));
+    if (note.author) parts.push(sanitize(note.author).slice(0, 30));
+    if (note.id) parts.push(sanitize(note.id).slice(0, 30));
+    return parts.join('_') || '小红书笔记';
   }
 
   /* ---------- 业务一：读取当前笔记的图片清单 ---------- */
@@ -474,10 +590,49 @@
     const clean = stripTransform(url);
     return {
       url,
+      thumb: url,
       width: 0,
       height: 0,
       candidates: buildCandidates(url, extractToken({}, clean)),
     };
+  }
+
+  /**
+   * 视频直链：优先 originVideoKey（原画），拿不到再从 media.stream 各清晰度档取最优。
+   * 视频字节预算更大，独立于图片的 maxTotalBytes。
+   * @param {object} video
+   * @returns {{ key: string, candidates: string[] }|null}
+   */
+  function parseVideo(video) {
+    if (!video) return null;
+    const consumer = unwrap(video.consumer) || {};
+    const originKey = consumer.originVideoKey;
+    if (typeof originKey === 'string' && originKey) {
+      return { key: 'origin', candidates: [`https://sns-video-bd.xhscdn.com/${originKey}`] };
+    }
+
+    const media = unwrap(video.media);
+    const stream = unwrap(media?.stream);
+    if (!stream || typeof stream !== 'object') return null;
+
+    // 清晰度档：分辨率/码率/体积都可能是 string，统一转数字再比较，取最优。
+    const tiers = [];
+    for (const [key, raw] of Object.entries(stream)) {
+      if (!raw || typeof raw !== 'object') continue;
+      const tier = unwrap(raw);
+      const width = Number(tier.width) || 0;
+      const height = Number(tier.height) || 0;
+      const bitrate = Number(tier.avgBitrate || tier.videoBitrate) || 0;
+      const urls = [tier.masterUrl, tier.backupUrls]
+        .flat()
+        .filter((url) => typeof url === 'string' && url && isValidCdnUrl(url));
+      if (urls.length === 0) continue;
+      tiers.push({ key, width, height, bitrate, urls });
+    }
+    if (tiers.length === 0) return null;
+    tiers.sort((a, b) => (b.height * b.width + b.bitrate) - (a.height * a.width + a.bitrate));
+    const best = tiers[0];
+    return { key: best.key, candidates: best.urls };
   }
 
   /**
@@ -527,8 +682,11 @@
       const url = pickImageUrl(entry);
       if (!url) continue;
       const clean = stripTransform(url);
+      // 缩略图用处理后的 urlDefault / url，预览网格体积小、加载快。
+      const thumb = (entry.urlDefault || entry.url || url).replace(/^http:/i, 'https:');
       images.push({
         url,
+        thumb: isValidCdnUrl(thumb) ? thumb : '',
         width: Number(entry.width) || 0,
         height: Number(entry.height) || 0,
         candidates: buildCandidates(url, extractToken(entry, clean)),
@@ -536,11 +694,15 @@
     }
 
     const user = unwrap(note.user) || {};
+    const type = String(note.type || '').toLowerCase();
+    const isVideo = type === 'video' || (images.length === 0 && !!note.video);
     return {
       id: noteId || String(note.noteId || note.note_id || note.id || ''),
       title: String(note.title || note.displayTitle || '').trim(),
       author: String(user.nickname || user.nickName || '').trim(),
       images: dedupeImages(images),
+      type: isVideo ? 'video' : 'image',
+      video: isVideo ? parseVideo(unwrap(note.video)) : null,
       source: 'state',
     };
   }
@@ -574,6 +736,8 @@
       title: String(titleEl?.textContent || document.title || '').trim(),
       author: '',
       images: dedupeImages(urls.map(makeImage)).slice(0, 30),
+      type: 'image',
+      video: null,
       source: 'dom',
     };
   }
@@ -598,13 +762,14 @@
   /* ---------- 业务二：拉取原图并校验清晰度 ---------- */
 
   /**
-   * 跨域取图：优先 GM_xmlhttpRequest（不受 CORS 限制），管理器不支持时退回 fetch。
+   * 跨域取资源：优先 GM_xmlhttpRequest（不受 CORS 限制），管理器不支持时退回 fetch。
    * signal 用于取消：GM 请求调 abort()，fetch 分支把外部 abort 转发给自己的 controller。
    * @param {string} url
    * @param {AbortSignal} [signal]
+   * @param {string} [accept] 可选 Accept 头；缺省按图片取。
    * @returns {Promise<Blob>}
    */
-  async function fetchBlob(url, signal) {
+  async function fetchBlob(url, signal, accept) {
     if (signal?.aborted) throw new Error('已取消');
 
     if (typeof GM_xmlhttpRequest === 'function') {
@@ -632,7 +797,9 @@
           timeout: CONFIG.fetchTimeout,
           // 与 fetch 分支 credentials:'omit' 对齐，不携带目标域 Cookie
           anonymous: true,
-          headers: { Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
+          headers: {
+            Accept: accept || 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          },
           onload: (res) => {
             if (res.status >= 200 && res.status < 300 && res.response) {
               finish(resolve, res.response);
@@ -657,7 +824,11 @@
     signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
-      const res = await fetch(url, { signal: controller.signal, credentials: 'omit' });
+      const res = await fetch(url, {
+        signal: controller.signal,
+        credentials: 'omit',
+        headers: accept ? { Accept: accept } : undefined,
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.blob();
     } finally {
@@ -889,6 +1060,8 @@
     cancelRequested: false,
     currentController: null,
     pendingRequests: new Set(),
+    /** 预览网格的勾选集合：存 image.url 去参数后的 key */
+    selection: new Set(),
   };
 
   /**
@@ -1034,6 +1207,66 @@
       }
       .s4tm-xhs-status--warn { color: #d46b08; }
       .s4tm-xhs-status--ok { color: #389e0d; }
+      .s4tm-xhs-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+        margin-top: 12px;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+      .s4tm-xhs-grid[hidden] { display: none; }
+      .s4tm-xhs-thumb {
+        position: relative;
+        aspect-ratio: 1 / 1;
+        overflow: hidden;
+        border: 2px solid transparent;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .s4tm-xhs-thumb.s4tm-xhs-thumb--on { border-color: #ff2442; }
+      .s4tm-xhs-thumb img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .s4tm-xhs-thumb-check {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #fff;
+        border: 1px solid #d9d9d9;
+        color: #fff;
+        font-size: 11px;
+        line-height: 18px;
+        text-align: center;
+        pointer-events: none;
+      }
+      .s4tm-xhs-thumb--on .s4tm-xhs-thumb-check {
+        background: #ff2442;
+        border-color: #ff2442;
+      }
+      .s4tm-xhs-grid-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+        font-size: 12px;
+        color: #595959;
+      }
+      .s4tm-xhs-grid-actions button {
+        border: 0;
+        background: none;
+        color: #ff2442;
+        padding: 0;
+        cursor: pointer;
+        font-size: 12px;
+        line-height: 1.5;
+      }
       @media (max-width: 480px) {
         #s4tm-xhs-panel { right: 12px; bottom: 12px; }
         .s4tm-xhs-card { width: 232px; }
@@ -1058,7 +1291,7 @@
 
   /** @param {boolean} enabled */
   function setButtonsEnabled(enabled) {
-    for (const btn of [state.ui?.zipBtn, state.ui?.eachBtn]) {
+    for (const btn of [state.ui?.zipBtn, state.ui?.eachBtn, state.ui?.videoBtn]) {
       if (btn) btn.disabled = !enabled;
     }
     if (state.ui?.cancelBtn) state.ui.cancelBtn.hidden = enabled;
@@ -1073,10 +1306,75 @@
     }
     if (state.ui?.meta) {
       const from = note?.source === 'dom' ? '页面元素（降级）' : '页面数据';
-      state.ui.meta.textContent = count > 0
-        ? `共 ${count} 张 · 来源：${from}`
-        : '打开一篇图文笔记后点击下载';
+      if (note?.type === 'video' && count === 0) {
+        state.ui.meta.textContent = '视频笔记 · 点「下载视频」保存原片';
+      } else {
+        state.ui.meta.textContent = count > 0
+          ? `共 ${count} 张 · 来源：${from}`
+          : '打开一篇图文笔记后点击下载';
+      }
     }
+    renderGrid();
+    renderVideoButton();
+  }
+
+  /** 预览网格：勾选要下载的图，切笔记时清空勾选。 */
+  function renderGrid() {
+    const grid = state.ui?.grid;
+    const note = state.note;
+    if (!grid) return;
+    grid.textContent = '';
+
+    const images = note?.images || [];
+    if (images.length === 0) {
+      grid.hidden = true;
+      state.selection.clear();
+      return;
+    }
+    grid.hidden = false;
+
+    // 切到新笔记时清空勾选，避免把上一篇的选中带到下一篇。
+    const keys = images.map((img) => stripTransform(img.url));
+    if (state.ui.lastNoteId !== note.id) {
+      state.selection.clear();
+      state.ui.lastNoteId = note.id;
+    }
+
+    for (const [index, image] of images.entries()) {
+      const key = stripTransform(image.url);
+      const item = document.createElement('div');
+      item.className = 's4tm-xhs-thumb';
+      if (state.selection.has(key)) item.classList.add('s4tm-xhs-thumb--on');
+
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = `第 ${index + 1} 张`;
+      img.src = image.thumb || image.url;
+      img.referrerPolicy = 'no-referrer';
+
+      const check = document.createElement('span');
+      check.className = 's4tm-xhs-thumb-check';
+      check.textContent = '✓';
+      item.append(img, check);
+
+      item.addEventListener('click', () => {
+        if (state.selection.has(key)) {
+          state.selection.delete(key);
+          item.classList.remove('s4tm-xhs-thumb--on');
+        } else {
+          state.selection.add(key);
+          item.classList.add('s4tm-xhs-thumb--on');
+        }
+      });
+      grid.appendChild(item);
+    }
+  }
+
+  function renderVideoButton() {
+    const btn = state.ui?.videoBtn;
+    if (!btn) return;
+    const hasVideo = !!state.note?.video && state.note.video.candidates.length > 0;
+    btn.hidden = !hasVideo;
   }
 
   function refresh() {
@@ -1084,19 +1382,28 @@
     renderMeta();
   }
 
-  /** @param {'zip'|'each'} mode */
-  async function downloadAll(mode) {
+  /** @param {'zip'|'each'} mode @param {object[]} [selectedImages] */
+  async function downloadAll(mode, selectedImages) {
     if (state.busy) return;
     // 每次点击都重新读一次，弹窗切换笔记时不会下到上一篇。
     refresh();
     const note = state.note;
-    if (!note || note.images.length === 0) {
-      setStatus('没找到图片：可能是视频笔记，或笔记还没加载完，稍后再试。', 'warn');
+    if (!note) {
+      setStatus('没找到笔记：可能还没加载完，稍后再试。', 'warn');
+      return;
+    }
+    const allImages = note.images || [];
+    if (allImages.length === 0) {
+      setStatus('没找到图片：可能是视频笔记，请点「下载视频」。', 'warn');
       return;
     }
 
-    const images = note.images.slice(0, CONFIG.maxImages);
-    const truncated = note.images.length > images.length;
+    // 用户点了预览勾选时，只下选中的；没选则全下。
+    const chosen = (selectedImages && selectedImages.length > 0)
+      ? selectedImages
+      : allImages;
+    const images = chosen.slice(0, CONFIG.maxImages);
+    const truncated = chosen.length > images.length;
     const total = images.length;
     const controller = new AbortController();
     const signal = controller.signal;
@@ -1110,7 +1417,7 @@
     setProgress(0, total);
     setStatus(
       truncated
-        ? `笔记共 ${note.images.length} 张，按上限只处理前 ${total} 张；正在取原图…`
+        ? `共选中 ${chosen.length} 张，按上限只处理前 ${total} 张；正在取原图…`
         : '正在取原图…',
       truncated ? 'warn' : 'info',
     );
@@ -1171,7 +1478,7 @@
         return;
       }
 
-      const base = sanitize(note.title || note.id || '小红书笔记');
+      const base = buildBaseName(note);
       entries = valid.map((record, index) => ({
         name: `${base}_${String(index + 1).padStart(2, '0')}.${record.ext}`,
         data: record.buffer,
@@ -1232,6 +1539,49 @@
     }
   }
 
+  /** 下载视频：取 originVideoKey 或 stream 最优档，落到 mp4。 */
+  async function downloadVideo() {
+    if (state.busy) return;
+    refresh();
+    const note = state.note;
+    if (!note || !note.video || note.video.candidates.length === 0) {
+      setStatus('没找到视频：可能是图文笔记，或视频地址还没解析出来。', 'warn');
+      return;
+    }
+
+    state.busy = true;
+    setButtonsEnabled(false);
+    setProgress(0, 1);
+    setStatus('正在取视频原片…', 'info');
+
+    try {
+      let blob = null;
+      for (const url of note.video.candidates) {
+        try {
+          blob = await fetchBlob(url, null, 'video/mp4,video/*,*/*;q=0.8');
+          if (blob && blob.size >= 1024) break;
+        } catch (err) {
+          log('视频候选源不可用', url, err.message);
+        }
+      }
+      if (!blob) {
+        setStatus('视频下载失败：所有候选源都取不到，检查跨域授权与登录态。', 'warn');
+        return;
+      }
+      const base = buildBaseName(note);
+      saveBlob(blob, `${base}.mp4`);
+      setProgress(1, 1);
+      setStatus(`完成：视频已下载（${(blob.size / 1048576).toFixed(1)}MB）。`, 'ok');
+    } catch (err) {
+      warn('视频下载失败', err);
+      setStatus(`视频下载失败：${err.message}`, 'warn');
+    } finally {
+      state.busy = false;
+      state.cancelRequested = false;
+      setButtonsEnabled(true);
+    }
+  }
+
   /** 元素创建统一走 createElement，标题等站点文本一律 textContent，杜绝注入。 */
   function createButton(className, text) {
     const btn = document.createElement('button');
@@ -1264,10 +1614,23 @@
     const meta = document.createElement('div');
     meta.className = 's4tm-xhs-meta';
 
+    const videoBtn = createButton('s4tm-xhs-btn', '下载视频');
+    videoBtn.hidden = true;
     const zipBtn = createButton('s4tm-xhs-btn', '打包下载 ZIP');
     const eachBtn = createButton('s4tm-xhs-btn s4tm-xhs-btn--ghost', '逐张保存');
     const cancelBtn = createButton('s4tm-xhs-btn s4tm-xhs-btn--ghost', '取消下载');
     cancelBtn.hidden = true;
+
+    const grid = document.createElement('div');
+    grid.className = 's4tm-xhs-grid';
+    grid.hidden = true;
+    const gridActions = document.createElement('div');
+    gridActions.className = 's4tm-xhs-grid-actions';
+    const selectAllBtn = createButton('', '全选');
+    const clearBtn = createButton('', '清空');
+    const gridHint = document.createElement('span');
+    gridHint.textContent = '点缩略图勾选要下载的图';
+    gridActions.append(selectAllBtn, clearBtn, gridHint);
 
     const option = document.createElement('label');
     option.className = 's4tm-xhs-option';
@@ -1289,7 +1652,10 @@
     status.className = 's4tm-xhs-status';
     status.textContent = '只下载当前这篇笔记的图片，全部在本地处理。';
 
-    card.append(head, title, meta, zipBtn, eachBtn, cancelBtn, option, progress, status);
+    card.append(
+      head, title, meta, videoBtn, zipBtn, eachBtn, cancelBtn,
+      grid, gridActions, option, progress, status,
+    );
 
     const fab = createButton('s4tm-xhs-fab', '原图下载');
     const count = document.createElement('span');
@@ -1301,20 +1667,48 @@
     document.body.appendChild(host);
 
     state.ui = {
-      host, card, fab, count, title, meta, zipBtn, eachBtn, cancelBtn,
-      checkbox, progress: progressFill, status,
+      host, card, fab, count, title, meta, videoBtn, zipBtn, eachBtn, cancelBtn,
+      grid, checkbox, progress: progressFill, status, lastNoteId: null,
     };
 
+    /** 取当前勾选的图片对象；没勾选时返回空数组（downloadAll 里会回退到全选）。 */
+    function selectedImages() {
+      const note = state.note;
+      if (!note) return [];
+      return note.images.filter((img) => state.selection.has(stripTransform(img.url)));
+    }
+
+    // 面板整体可拖拽：fab 按钮是常驻把手，卡片头部也能拖动面板。
+    const fabDragged = makeDraggable(host, { handle: fab });
+    makeDraggable(host, { handle: head });
+
     on(fab, 'click', () => {
+      // 拖动 fab 会附带一次 click，靠 wasDragged 区分，避免拖完误开面板。
+      if (fabDragged()) return;
       card.hidden = !card.hidden;
       if (!card.hidden) refresh();
     });
     on(close, 'click', () => { card.hidden = true; });
+    // 关闭按钮在 head 拖拽把手内，阻止 pointerdown 冒泡，避免点关闭触发拖拽。
+    on(close, 'pointerdown', (event) => { event.stopPropagation(); });
+    on(videoBtn, 'click', () => {
+      downloadVideo().catch((err) => warn('下载异常', err));
+    });
     on(zipBtn, 'click', () => {
-      downloadAll('zip').catch((err) => warn('下载异常', err));
+      downloadAll('zip', selectedImages()).catch((err) => warn('下载异常', err));
     });
     on(eachBtn, 'click', () => {
-      downloadAll('each').catch((err) => warn('下载异常', err));
+      downloadAll('each', selectedImages()).catch((err) => warn('下载异常', err));
+    });
+    on(selectAllBtn, 'click', () => {
+      const note = state.note;
+      if (!note) return;
+      for (const img of note.images) state.selection.add(stripTransform(img.url));
+      renderGrid();
+    });
+    on(clearBtn, 'click', () => {
+      state.selection.clear();
+      renderGrid();
     });
     on(cancelBtn, 'click', () => {
       state.cancelRequested = true;
@@ -1402,6 +1796,7 @@
     state.ui = null;
     state.note = null;
     state.busy = false;
+    state.selection.clear();
 
     if (CONFIG.debug && window.__S4TM__) delete window.__S4TM__;
     log('已卸载');
