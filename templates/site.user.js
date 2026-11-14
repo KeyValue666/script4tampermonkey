@@ -148,6 +148,112 @@
     },
   };
 
+  /**
+   * 让一个浮层元素可拖拽（规范 2.6.1：面板 / 工具按钮必须支持拖拽）。
+   * 用 pointer 事件 + setPointerCapture 覆盖鼠标与触摸；直接更新 right/bottom 内联值，
+   * 与元素「贴边定位」的锚定语义一致，拖拽后仍受视口钳制、不会拖出屏幕。
+   * @param {Element} el 要拖动的元素（用 right/bottom 定位的 fixed 元素）
+   * @param {{ handle?: Element, resetKey?: string, resetOn?: 'dblclick'|'none' }} [options]
+   *   - handle：拖拽把手；缺省时整个元素都可拖
+   *   - resetKey：store 里保存位置的键名，空则不持久化
+   *   - resetOn：双击复位；缺省 'dblclick'（把手或元素上双击即复位）
+   */
+  function makeDraggable(el, { handle, resetKey = 'position', resetOn = 'dblclick' } = {}) {
+    const dragTarget = handle || el;
+    const PAD = 8;
+    let startX = 0;
+    let startY = 0;
+    let startRight = 0;
+    let startBottom = 0;
+    let dragging = false;
+    let moved = false;
+
+    function readDefaults() {
+      const cs = window.getComputedStyle(el);
+      const right = parseFloat(cs.right);
+      const bottom = parseFloat(cs.bottom);
+      return {
+        right: Number.isFinite(right) ? right : 20,
+        bottom: Number.isFinite(bottom) ? bottom : 24,
+      };
+    }
+
+    function clamp(right, bottom) {
+      const rect = el.getBoundingClientRect();
+      const maxRight = Math.max(PAD, window.innerWidth - rect.width - PAD);
+      const maxBottom = Math.max(PAD, window.innerHeight - rect.height - PAD);
+      return {
+        right: Math.min(Math.max(right, PAD), maxRight),
+        bottom: Math.min(Math.max(bottom, PAD), maxBottom),
+      };
+    }
+
+    function apply(right, bottom) {
+      const pos = clamp(right, bottom);
+      el.style.right = `${pos.right}px`;
+      el.style.bottom = `${pos.bottom}px`;
+    }
+
+    const defaults = readDefaults();
+    const saved = resetKey ? store.get(resetKey, null) : null;
+    if (saved && typeof saved.right === 'number' && typeof saved.bottom === 'number') {
+      apply(saved.right, saved.bottom);
+    }
+
+    function reset() {
+      apply(defaults.right, defaults.bottom);
+      if (resetKey) store.set(resetKey, { right: defaults.right, bottom: defaults.bottom });
+    }
+
+    function onPointerDown(event) {
+      if (event.button !== 0 && event.pointerType === 'mouse') return;
+      dragging = true;
+      moved = false;
+      startX = event.clientX;
+      startY = event.clientY;
+      const cs = window.getComputedStyle(el);
+      startRight = parseFloat(cs.right) || defaults.right;
+      startBottom = parseFloat(cs.bottom) || defaults.bottom;
+      dragTarget.setPointerCapture?.(event.pointerId);
+      el.style.userSelect = 'none';
+      el.style.touchAction = 'none';
+    }
+
+    function onPointerMove(event) {
+      if (!dragging) return;
+      moved = true;
+      // 向右拖 dx>0 → right 减小；向上拖 dy<0 → bottom 增大。
+      apply(startRight - (event.clientX - startX), startBottom - (event.clientY - startY));
+    }
+
+    function onPointerUp(event) {
+      if (!dragging) return;
+      dragging = false;
+      dragTarget.releasePointerCapture?.(event.pointerId);
+      el.style.userSelect = '';
+      el.style.touchAction = '';
+      if (moved && resetKey) {
+        const cs = window.getComputedStyle(el);
+        store.set(resetKey, {
+          right: Math.round(parseFloat(cs.right)),
+          bottom: Math.round(parseFloat(cs.bottom)),
+        });
+      }
+    }
+
+    dragTarget.addEventListener('pointerdown', onPointerDown);
+    dragTarget.addEventListener('pointermove', onPointerMove);
+    dragTarget.addEventListener('pointerup', onPointerUp);
+    dragTarget.addEventListener('pointercancel', onPointerUp);
+
+    if (resetOn === 'dblclick') {
+      dragTarget.addEventListener('dblclick', reset);
+    }
+
+    // 供调用方在 click 处理里区分「拖了一下」和「点了一下」。
+    return () => moved;
+  }
+
   /* ---------- 业务 ---------- */
 
   /** 已挂载标记：同一次页面生命周期内只注入一次，防止 SPA 重复挂载 */
