@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.2.2
-// @description  B 站首页隐藏轮播让推荐视频排成 2 行 × 5 列、Alt+R 旋转竖屏视频、一键提取视频音频
+// @version      2.3.0
+// @description  B 站首页 2×5 推荐、Alt+R 旋转视频、一键提取音频、去广告与追踪参数、动态页宽屏
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
 // @match        https://t.bilibili.com/*
@@ -56,6 +56,21 @@
     '[class*="recommended-swipe"]',
   ];
   const VIDEO_LINK_SELECTOR = 'a[href*="/video/"]';
+
+  /** 地址栏里对分享/跳转/追踪无意义、可安全删除的参数 */
+  const TRACKING_PARAMS = [
+    'buvid',
+    'is_story_h5',
+    'launch_id',
+    'live_from',
+    'mid',
+    'session_id',
+    'timestamp',
+    'up_id',
+    'vd_source',
+    /^share/,
+    /^spm/,
+  ];
 
   /* ---------- 工具 ---------- */
 
@@ -656,6 +671,99 @@
     }
   }
 
+  /* ---------- 功能四：去广告与追踪参数 ---------- */
+
+  /*
+   * 追踪参数清理不依赖 unsafeWindow：history 是页面与隔离世界共享的同一
+   * 个对象，包装 pushState / replaceState 即可拦截所有站内跳转。只删参数、
+   * 不拦截上报、不碰 fetch / XHR（那些改写页面全局对象的做法在 @grant none
+   * 的隔离世界里做不到，也不在本脚本范围内）。
+   */
+
+  function removeTracking(url) {
+    if (!url) return url;
+    try {
+      const target = new URL(url, location.href);
+      if (!target.search) return url;
+
+      const params = target.searchParams;
+      for (const key of [...params.keys()]) {
+        const hit = TRACKING_PARAMS.some((item) =>
+          (typeof item === 'string' && item === key)
+          || (item instanceof RegExp && item.test(key)),
+        );
+        if (hit) params.delete(key);
+      }
+
+      target.search = params.toString();
+      return target.toString();
+    } catch (err) {
+      // URL 非法时原样返回，不打断站点自身的跳转逻辑
+      return url;
+    }
+  }
+
+  function patchHistory() {
+    // 幂等：用标记避免重复包裹，也避免破坏站点自身可能存在的包装
+    if (history.__s4tmPatched) return;
+    history.__s4tmPatched = true;
+
+    const wrap = (method) => function patched(state, title, url) {
+      return method.call(this, state, title, removeTracking(url));
+    };
+
+    // 只包一层，保留原始引用，杜绝层层代理（对应规范 6.5 原生 API 改写项）
+    const origPush = history.pushState.bind(history);
+    const origReplace = history.replaceState.bind(history);
+    history.pushState = wrap(origPush);
+    history.replaceState = wrap(origReplace);
+
+    // 记录原始实现，destroy() 时还原
+    runtime.historyPatched = { push: origPush, replace: origReplace };
+  }
+
+  /* ---------- 功能五：站点样式增强（去广告 / 动态页） ---------- */
+
+  /*
+   * 纯 CSS 实现，全部限定在稳定选择器上，不触碰站点布局关键类名。
+   * 与功能二（首页 2×5）不同：那一块依赖运行时 DOM 探测，这里只需
+   * 静态样式，随 installStyles 一次性注入即可。
+   */
+
+  function getSiteEnhancementCss() {
+    const rules = [
+      // 广告：B 站商单落地页、上报容器、空广告卡、屏蔽提示
+      '.ad-report, a[href*="cm.bilibili.com"] { display: none !important; }',
+      '.adblock-tips, .feed-card:has(.bili-video-card:empty) { display: none !important; }',
+    ];
+
+    if (location.hostname === 'www.bilibili.com') {
+      rules.push(
+        // 首页：隐藏商单广告卡与空视频卡，并清零容器内卡片顶部间距
+        '.feed2 .feed-card:has(a[href*="cm.bilibili.com"]),'
+          + ' .feed2 .feed-card:has(.bili-video-card:empty) { display: none !important; }',
+        '.feed2 .container > * { margin-top: 0 !important; }',
+      );
+    }
+
+    if (location.hostname === 't.bilibili.com') {
+      rules.push(
+        // 动态页：宽屏模式下铺满容器，并隐藏带货卡
+        'html[wide] #app { display: flex; }',
+        'html[wide] .bili-dyn-home--member {'
+          + ' box-sizing: border-box; padding: 0 10px; width: 100%; flex: 1; }',
+        'html[wide] .bili-dyn-content { width: initial; }',
+        'html[wide] main { margin: 0 8px; flex: 1; overflow: hidden; width: initial; }',
+        '#wide-mode-switch { margin-left: 0; margin-right: 20px; }',
+        '.bili-dyn-list__item:has(.bili-dyn-card-goods),'
+          + ' .bili-dyn-list__item:has(.bili-rich-text-module.goods)'
+          + ' { display: none !important; }',
+      );
+    }
+
+    return rules.join('\n');
+  }
+
   /* ---------- 样式 ---------- */
 
   function installStyles() {
@@ -903,6 +1011,12 @@
     `;
 
     (document.head || document.documentElement).appendChild(style);
+
+    // 站点增强（去广告 / 动态页宽屏）单独一个 style，便于 destroy 时独立回收
+    const enhance = document.createElement('style');
+    enhance.id = 's4tm-enhance-styles';
+    enhance.textContent = getSiteEnhancementCss();
+    (document.head || document.documentElement).appendChild(enhance);
   }
 
   /* ---------- 面板 ---------- */
@@ -1153,13 +1267,53 @@
     state.savedVideoStyle = null;
     resetHomeLayout();
 
-    for (const id of ['s4tm-styles', 's4tm-panel', 's4tm-show-panel']) {
+    // 还原 history 包装，避免残留对跳转 URL 的改写
+    if (runtime.historyPatched) {
+      history.pushState = runtime.historyPatched.push;
+      history.replaceState = runtime.historyPatched.replace;
+      runtime.historyPatched = null;
+      history.__s4tmPatched = false;
+    }
+
+    for (const id of ['s4tm-styles', 's4tm-enhance-styles', 's4tm-panel', 's4tm-show-panel']) {
       document.getElementById(id)?.remove();
     }
     state.panel = null;
 
     if (CONFIG.debug && window.__S4TM__) delete window.__S4TM__;
     log('已卸载');
+  }
+
+  /** 动态页：注入「宽屏模式」切换按钮，铺满页面（不依赖 unsafeWindow） */
+  function setupWideModeToggle() {
+    if (location.hostname !== 't.bilibili.com') return;
+
+    // 默认开启宽屏，除非用户显式关闭过（复用站点原生存储键，与站点自身行为一致）
+    if (!localStorage.getItem('WIDE_OPT_OUT')) {
+      document.documentElement.setAttribute('wide', 'wide');
+    }
+
+    on(window, 'load', () => {
+      const tabs = document.querySelector('.bili-dyn-list-tabs__list');
+      if (!tabs) return;
+
+      const switchButton = document.createElement('a');
+      switchButton.id = 'wide-mode-switch';
+      switchButton.className = 'bili-dyn-list-tabs__item';
+      switchButton.textContent = '宽屏模式';
+      switchButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (localStorage.getItem('WIDE_OPT_OUT')) {
+          localStorage.removeItem('WIDE_OPT_OUT');
+          document.documentElement.setAttribute('wide', 'wide');
+        } else {
+          localStorage.setItem('WIDE_OPT_OUT', '1');
+          document.documentElement.removeAttribute('wide');
+        }
+      });
+
+      tabs.appendChild(switchButton);
+    });
   }
 
   function init() {
@@ -1170,6 +1324,8 @@
     installStyles();
     createPanel();
     startLayoutWatcher();
+    patchHistory();
+    setupWideModeToggle();
 
     if (isHomePage()) scheduleLayout(0);
 

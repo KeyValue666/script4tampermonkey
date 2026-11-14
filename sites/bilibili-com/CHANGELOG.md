@@ -1,5 +1,19 @@
 # 变更记录
 
+## [2.3.0] - 2026-11-14
+
+### 新增
+
+- 去广告：隐藏商单落地页链接（`a[href*="cm.bilibili.com"]`）、广告上报容器（`.ad-report`）、空广告卡与屏蔽提示（`.adblock-tips`、`.feed-card:has(.bili-video-card:empty)`）。
+- 首页增强：隐藏首页商单广告卡与空视频卡，并清零推荐容器内卡片顶部间距。
+- 动态页（`t.bilibili.com`）宽屏模式：默认铺满容器，标题栏注入「宽屏模式」切换入口（复用站点原生 `WIDE_OPT_OUT` 存储，行为与站点一致），并隐藏带货卡。
+- 地址栏去追踪参数：包装 `history.pushState` / `replaceState`，跳转时删除 `buvid`、`vd_source`、`spm_*`、`share_*` 等无意义追踪参数。
+
+### 说明
+
+- 以上功能全部在 `@grant none` 的隔离世界里实现，未引入 `unsafeWindow`、GM API 或任何依赖，仍保持单文件离线运行。
+- 桌面脚本（Make BiliBili Great Again）中的去 WebRTC、去 P2P CDN、屏蔽上报、视频裁切、原画直播等功能依赖改写页面全局对象（`unsafeWindow`），与本脚本架构冲突，**未移植**。
+
 ## [2.2.2] - 2026-11-11
 
 ### 修复
