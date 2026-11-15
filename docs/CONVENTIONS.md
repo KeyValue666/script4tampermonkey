@@ -182,6 +182,7 @@ const warn = (...args) => console.warn(PREFIX, ...args);
 - **边界约束**：拖拽结束后把位置钳制在视口内（含 padding），面板不能拖到屏幕外找不回。用 `right/bottom` 定位时，钳制区间为 `[pad, 视口尺寸 - 面板尺寸 - pad]`。
 - **位置持久化**：把 `{ right, bottom }`（或 `{ left, top }`）用 `store` 保存为 `s4tm:<site-key>:position`，下次打开恢复；只存必要坐标，不存其它数据。
 - **复位能力**：提供一个恢复默认位置的入口（例如双击把手复位，或面板内「复位」小按钮），避免拖丢后无法找回。
+- **指针捕获**：`setPointerCapture(id)` / `releasePointerCapture(id)` **必须传 `pointerId`**，无参调用会抛 `TypeError: 1 argument required, but only 0 present`。若 `pointerup` / `pointercancel` 共用一个拿不到 `event` 的结束函数，就在 `pointerdown` 里把 `pointerId` 记下来再传；释放时包 `try/catch`，因为 `pointercancel` 时浏览器可能已自动释放。
 - **资源回收**：拖拽监听器必须用统一登记（`on()` / 生命周期封装）注册，`destroy()` 时一并注销，不累积。
 
 ### 2.7 样式注入

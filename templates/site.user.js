@@ -229,7 +229,13 @@
     function onPointerUp(event) {
       if (!dragging) return;
       dragging = false;
-      dragTarget.releasePointerCapture?.(event.pointerId);
+      // 必须传 pointerId：无参调用会抛 TypeError。
+      // pointercancel 时浏览器可能已自动释放，包一层 try/catch 避免二次报错。
+      try {
+        dragTarget.releasePointerCapture?.(event.pointerId);
+      } catch (err) {
+        log('释放指针捕获失败', err.message);
+      }
       el.style.userSelect = '';
       el.style.touchAction = '';
       if (moved && resetKey) {
