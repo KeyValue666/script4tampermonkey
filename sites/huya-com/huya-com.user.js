@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 虎牙直播 · 清爽观影
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/huya-com
-// @version      0.2.1
+// @version      0.2.2
 // @description  虎牙直播间只留视频、弹幕和发言：隐藏推荐、礼物、侧栏，并拦截埋点广告请求降低占用
 // @author       KeyValue666
 // @match        https://www.huya.com/*
@@ -98,6 +98,14 @@
    *         └ .room-core-r > .room-sidebar > #chatRoom 弹幕与发言
    *   .room-footer 下方推荐 / 动态 / 公会 / 猜你喜欢
    *   .mod-sidebar 左侧边栏
+   *
+   * 装修 / 大背景房（room_match_*.css，例如 /laogui2016）多包一层：
+   *   #main_col
+   *     ├ .diy-comp#matchComponent2 头图，内含 #J_spbg 大背景
+   *     └ .main-room > .match-room > .room-wrap > .room-core ...
+   *
+   * 关键：.match-room 是 .room-wrap 的直接父级（max-width:1560px 的布局容器），
+   * 隐藏它会把播放器一起干掉，整页黑屏。只能隐藏它内部的 .match-top / .match-nav。
    *
    * 礼物栏有两处占位：外层 .room-player-wrap 的 padding-bottom，以及播放器内部
    * #videoContainer 里 .player-wrap 的 calc(100% - 60px) + #player-gift-wrap。
@@ -217,6 +225,11 @@
       padding: 0 12px !important;
     }
 
+    /* 装修房的 .match-room 自带 max-width:1560px，宽屏下会居中留白，必须放开 */
+    html[data-s4tm-clean="1"] .match-room {
+      max-width: none !important;
+    }
+
     html[data-s4tm-clean="1"] .room-wrap,
     html[data-s4tm-clean="1"] #main_col,
     html[data-s4tm-clean="1"] .main-room {
@@ -243,6 +256,7 @@
     }
 
     /* ---------- 隐藏：站点框架、推荐、礼物、活动与榜单 ---------- */
+    /* 装修房只隐藏 .match-top / .match-nav，绝不能碰它们的父级 .match-room */
     html[data-s4tm-clean="1"] #duya-header,
     html[data-s4tm-clean="1"] .mod-sidebar,
     html[data-s4tm-clean="1"] .room-footer,
@@ -251,7 +265,8 @@
     html[data-s4tm-clean="1"] .room-gg-1,
     html[data-s4tm-clean="1"] .room-gg-2,
     html[data-s4tm-clean="1"] #matchComponent2,
-    html[data-s4tm-clean="1"] .match-room,
+    html[data-s4tm-clean="1"] .match-top,
+    html[data-s4tm-clean="1"] .match-nav,
     html[data-s4tm-clean="1"] #match-cms-content,
     html[data-s4tm-clean="1"] .room-player-gift-placeholder,
     html[data-s4tm-clean="1"] .send-gift {
@@ -320,9 +335,10 @@
      * 这些容器会不断创建 DOM、跑动画或绘制 canvas（礼物飘屏、跑马灯、
      * 活动横幅、播放器内推荐卡片）。隐藏后浏览器不再布局与绘制它们，
      * 也不影响视频画面和右侧弹幕文本。类名取自 vplayer.css 的 mod-simple 列表
-     * 与虎牙直播间 SSR 结构，少量历史类名作为兜底，不匹配时无副作用。
-     * 刻意不用 player-panel / common-popup 这类泛化弹窗类名，
+     * 与虎牙直播间 SSR 结构。刻意不用 player-panel / common-popup 这类泛化弹窗类名，
      * 它们可能承载表情、屏蔽词等互动面板，不能为了省一点开销误伤发言。
+     * 0.2.2 移除了 diy-comps-wrap / diy-toutu / special-bg 这三个未核实的兜底类名：
+     * 装修房里这类节点有可能是播放器的祖先，隐藏它们会直接黑屏。
      */
     html[data-s4tm-clean="1"] .danmu-effect-wrap,
     html[data-s4tm-clean="1"] #player-marquee-wrap,
@@ -337,10 +353,7 @@
     html[data-s4tm-clean="1"] .room-gg-chat,
     html[data-s4tm-clean="1"] #sidebarBanner,
     html[data-s4tm-clean="1"] .sidebar-banner,
-    html[data-s4tm-clean="1"] #player-download-guide-tip,
-    html[data-s4tm-clean="1"] .diy-comps-wrap,
-    html[data-s4tm-clean="1"] .diy-toutu,
-    html[data-s4tm-clean="1"] .special-bg {
+    html[data-s4tm-clean="1"] #player-download-guide-tip {
       display: none !important;
     }
 
@@ -765,9 +778,15 @@
     put(anchor, meta.anchor);
   }
 
-  function setEnabled(enabled) {
+  /**
+   * 切换清爽模式。persist 为 false 时只改本次页面状态、不写偏好，
+   * 供自检降级使用：站点结构异常不该把用户设置永久改掉。
+   * @param {boolean} enabled
+   * @param {{ persist?: boolean }} [options]
+   */
+  function setEnabled(enabled, { persist = true } = {}) {
     state.enabled = enabled;
-    store.set('cleanMode', enabled);
+    if (persist) store.set('cleanMode', enabled);
 
     if (enabled) {
       document.documentElement.setAttribute(CLEAN_ATTR, '1');
@@ -784,6 +803,34 @@
     }
 
     log('清爽模式', enabled ? '开启' : '关闭');
+
+    // 所有开启路径（首次挂载、SPA 回来、手动切换）都过一遍黑屏自检
+    if (enabled) {
+      verifyPlayerVisible().catch((err) => warn('播放器可见性自检失败', err));
+    }
+  }
+
+  /**
+   * 自检：清爽模式开启后播放器容器必须仍占位。任一祖先被误隐藏时
+   * getClientRects() 为空，此时自动退回原版，宁可少精简也不能整页黑屏。
+   * 降级只改本次页面状态，不写用户偏好。
+   */
+  async function verifyPlayerVisible() {
+    if (!state.enabled || runtime.disposed) return;
+
+    let player;
+    try {
+      player = await waitFor('#J_playerMain');
+    } catch (err) {
+      log('播放器节点未出现，跳过可见性自检', err.message);
+      return;
+    }
+    if (runtime.disposed || !state.enabled) return;
+
+    if (typeof player.getClientRects === 'function' && player.getClientRects().length === 0) {
+      warn('播放器被隐藏，已自动关闭清爽模式（不改动你的偏好）');
+      setEnabled(false, { persist: false });
+    }
   }
 
   function onKeyDown(event) {
