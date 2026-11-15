@@ -1,5 +1,51 @@
 # 变更记录
 
+## [0.3.4] - 2026-11-15
+
+### 修复
+
+针对「某篇视频笔记完全没识别出可下载视频」的代码审查，修掉三个会让视频解析根本跑不到的缺陷：
+
+- `findCurrentNote()` 原来要求 `imageList` 必须是数组才认这篇笔记。视频笔记的 `imageList` 可能缺失或不是数组，导致整篇笔记被判无效、直接 `return null`。新增 `looksLikeNote()`：有数组 `imageList`，或 `type === 'video'`，或 `hasVideoData(video)` 任一成立即可；`list` 也改为只在数组时迭代。
+- `resolveNote()` 原来只认 `note.images.length > 0`，视频笔记没有封面时会掉进 `collectFromDom()` 降级；该降级在页面没有 `og:video` / video 元素时返回 `type: 'image', video: null`，**把 SSR 已解析出的视频信息覆盖丢掉**。改为「有图或有视频候选」都直接返回 SSR 结果，并保留一层兜底合并。
+- `observeNoteRoot()` 只在笔记容器「出现 / 消失」翻转时才 `refresh()`。详情页容器一直存在、媒体数据由客户端异步填充时永远不会重解析，面板停在初始空状态。新增 `scheduleProbe()`：数据未就绪时按 `probeInterval=600ms` 有限重查（最多 `probeMax=30` 次 ≈18 秒），拿到可用内容或次数耗尽即停；`mount()` / `onUrlChange()` / 重复挂载路径都会重置探测窗口，定时器走 `later()` 登记、`destroy()` 统一回收。
+
+### 新增
+
+- README「开发说明」新增「排障：视频识别不到时取真实数据」小节，附一段可直接在 Console 执行的诊断脚本，输出面板版本、`noteDetailMap` 命中情况、`type` / `imageList` / `video` 的字段结构与 `og:video` 状态，便于站点改版后针对性补解析。
+
+## [0.3.3] - 2026-11-15
+
+### 修复
+
+- **点开面板时报 `Uncaught TypeError: ... 1 argument required, but only 0 present`**。`makeDraggable` 的 `end()` 被改成无参函数后仍调用 `releasePointerCapture()`，缺 `pointerId` 必然抛错。改为在 `pointerdown` 里把 `pointerId` 存入 `activePointerId`，抬手时传入并清空；释放包 `try/catch`，避免 `pointercancel` 时浏览器已自动释放导致二次报错。模板 `makeDraggable` 与 `CONVENTIONS` 2.6.1 同步补了这条约束。
+- **视频笔记仍被判成图文、下到封面（上一版修复没真正生效）**。上一版只处理了「已判定为视频」之后的面板模式，但判定本身是 `type === 'video' || (images.length === 0 && !!note.video)`：视频笔记的 `imageList` 里带一张封面时 `images.length !== 0`，且 `note.type` 不一定等于 `'video'`，于是直接掉回图文分支，ZIP 与缩略图网格照常显示。改为：
+  - `hasVideoData()` 直接检查 `note.video` 里的视频线索（`consumer.originVideoKey` / `origin_video_key`、`media.stream`、顶层 `url` / `videoUrl` / `playUrl` / `masterUrl`），命中即为视频笔记，与图片数无关。
+  - `parseVideo()` 同步支持顶层播放地址字段（标 `derived` / `watermarked`，不冒充无水印）。
+  - `parseVideoFromDom()`：SSR 字段完全改版时从 `og:video` / 页面 video 元素兜底取播放地址；只在 `note.video` 非空或 `type` 明确时才启用，避免信息流里其它 video 元素把图文笔记误判。`collectFromDom()` 降级路径同样会识别视频，不再因「找不到 img」丢弃整篇视频笔记。
+- 面板根节点新增 `data-s4tm-version`（由 `SCRIPT_VERSION` 常量写入，须与 `@version` 同步）。Console 执行 `document.getElementById('s4tm-xhs-panel')?.dataset.s4tmVersion` 可确认浏览器里实际加载的版本，避免把「旧脚本没更新」误判成「修复没生效」。
+
+## [0.3.2] - 2026-11-15
+
+### 修复
+
+- **视频笔记下载到的是封面而不是视频**。视频笔记的 `imageList` 里通常有一张封面，`count=1` 让旧版 `renderMeta` 走了图文分支，于是「共 1 张」、缩略图网格、「打包下载 ZIP」全部照常显示，点 ZIP 拿到的就是封面；若视频地址解析失败，视频按钮还会被隐藏，面板只剩封面这条路，看起来就像脚本把封面当成视频。
+- 新增 `applyNoteMode()` 按笔记类型切换面板：视频笔记隐藏「打包下载 ZIP」、缩略图网格、全选/清空与「多源择优」，角标归零，逐张按钮改名为「下载封面（静态图）」；`renderGrid()` 对视频笔记返回空网格并清空勾选，封面不再混进图片下载链路。meta 写明「封面仅为静态帧」；视频解析失败时给出「未解析到视频地址（检查登录态 / 站点改版）」诊断，封面入口仍保留。
+- 补 CSS `.s4tm-xhs-option[hidden]` / `.s4tm-xhs-grid-actions[hidden]`：这两处声明了 `display: flex`，会盖过 UA 的 `[hidden] { display: none }`，导致 `hidden` 属性根本藏不住元素。
+- `state.ui` 补 `gridActions` / `option` 引用，供模式切换控制显隐。
+
+## [0.3.1] - 2026-11-15
+
+### 修复
+
+- **视频下载不能保证无水印**。`media.stream` 各清晰度档是网页播放器的带水印流（`/259/`、`_259`），旧版把它当「原片」兜底还标成成功；只有 `video.consumer.originVideoKey` 拼 `sns-video-bd` 才是无水印源片。改为：
+  - 兼容 `originVideoKey` 与 `origin_video_key` 两种字段命名（漏一种就会退化到带水印流）；还原 key 里可能的 `\u002F`。
+  - 生成 `sns-video-bd` + `sns-video-hw` 双无水印候选；旧版 origin 存在时直接返回单候选，bd 取不到就彻底失败，现在有兜底链。
+  - 无原片标识时，用 `deriveCleanVideoUrl()` 把 `/259/`、`_259` 派生成同源 `/258/`、`_258` 无水印地址优先尝试；派生不了才退到带水印播放流。
+  - 候选按 `clean`（确定无水印）→ `derived`（258 规律，疑似无水印）→ `watermarked`（带水印）排序，按钮文案与状态栏都如实说明实际命中的档位，不冒充无水印。
+- 视频 URL 校验拆出独立的 `isValidVideoUrl()`：图片用的 `isValidCdnUrl()` 会排除路径含 `video` 的 URL，用在视频流上会误杀。
+- 顺带修掉旧版循环里取到小于 1KB 响应时未重置 `blob`、可能保存垃圾文件的问题。
+
 ## [0.3.0] - 2026-11-14
 
 ### 新增

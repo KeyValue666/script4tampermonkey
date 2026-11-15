@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         S4TM · 小红书 · 笔记原图视频下载
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/xiaohongshu-com
-// @version      0.3.0
-// @description  小红书笔记页一键打包下载全部图片、下载视频，自动取 CDN 原始尺寸、去掉压缩与水印参数，面板可拖拽
+// @version      0.3.4
+// @description  小红书笔记页一键打包下载全部图片、无水印视频，自动取 CDN 原始尺寸、去掉压缩与水印参数，面板可拖拽
 // @author       KeyValue666
 // @match        https://www.xiaohongshu.com/*
 // @match        https://xiaohongshu.com/*
@@ -29,6 +29,8 @@
   const PREFIX = `[s4tm:${SITE_KEY}]`;
   const MOUNTED_ATTR = 'data-s4tm-mounted';
   const PANEL_ID = 's4tm-xhs-panel';
+  /** 必须与头部 @version 同步。写进面板属性，方便确认浏览器里跑的是哪一版。 */
+  const SCRIPT_VERSION = '0.3.4';
 
   const CONFIG = {
     /** 本地调试时改 true；提交前必须恢复为 false */
@@ -45,6 +47,9 @@
     minBytes: 30 * 1024,
     /** DOM 变动后的刷新防抖 */
     refreshDebounce: 160,
+    /** 首屏媒体数据异步到达时的重查间隔与最大次数（600ms × 30 ≈ 18 秒） */
+    probeInterval: 600,
+    probeMax: 30,
     /** 逐张保存的间隔，避免浏览器把多次下载合并拦截 */
     saveInterval: 320,
     /** 一次最多处理的图片数，与 DOM 降级路径一致，防止超大图集撑爆内存 */
@@ -258,6 +263,7 @@
     let startY = 0;
     let startRight = 0;
     let startBottom = 0;
+    let activePointerId = null;
     let dragging = false;
     let moved = false;
 
@@ -309,7 +315,9 @@
       const cs = window.getComputedStyle(el);
       startRight = parseFloat(cs.right) || defaults.right;
       startBottom = parseFloat(cs.bottom) || defaults.bottom;
-      dragTarget.setPointerCapture?.(event.pointerId);
+      // 记下 pointerId 供抬手时释放；end 拿不到 event，不能在这里现取。
+      activePointerId = event.pointerId;
+      dragTarget.setPointerCapture?.(activePointerId);
       el.style.userSelect = 'none';
       el.style.touchAction = 'none';
     });
@@ -324,7 +332,16 @@
     const end = () => {
       if (!dragging) return;
       dragging = false;
-      dragTarget.releasePointerCapture?.();
+      // releasePointerCapture 必须传 pointerId，否则抛 TypeError。
+      // pointercancel 时浏览器可能已自动释放，包一层 try/catch 避免二次报错。
+      if (activePointerId !== null) {
+        try {
+          dragTarget.releasePointerCapture?.(activePointerId);
+        } catch (err) {
+          log('释放指针捕获失败', err.message);
+        }
+        activePointerId = null;
+      }
       el.style.userSelect = '';
       el.style.touchAction = '';
       // 拖出一定距离才算拖动，避免把「点击」误判成「拖动」。
@@ -473,6 +490,24 @@
   }
 
   /**
+   * 视频直链校验：只认自家 CDN 的 HTTPS 地址。
+   * 不能复用 isValidCdnUrl——后者按「图片」语义排除了路径含 video 的 URL，会误杀视频流。
+   * @param {string} raw
+   * @returns {boolean}
+   */
+  function isValidVideoUrl(raw) {
+    try {
+      const url = new URL(String(raw).replace(/^http:/i, 'https:'));
+      const host = url.hostname;
+      const allowed = host === 'xhscdn.com' || host.endsWith('.xhscdn.com')
+        || host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com');
+      return url.protocol === 'https:' && allowed && url.pathname.length > 1;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /**
    * 剥掉 CDN 的缩放、格式转换与水印参数：?imageView2…、!nd_dft_wlteh_webp_3 等。
    * @param {string} raw
    * @returns {string}
@@ -598,41 +633,177 @@
   }
 
   /**
-   * 视频直链：优先 originVideoKey（原画），拿不到再从 media.stream 各清晰度档取最优。
-   * 视频字节预算更大，独立于图片的 maxTotalBytes。
+   * 从带水印的 stream 地址派生无水印版：平台用 /259/ 与 _259 标记带水印流，
+   * /258/ 与 _258 是同源无水印版（社区验证的路径规律）。不动域名，只换编号。
+   * 已经是 258 或不含 259 标记时返回空串，避免凭空造 URL。
+   * @param {string} raw
+   * @returns {string}
+   */
+  function deriveCleanVideoUrl(raw) {
+    const url = String(raw).replace(/^http:/i, 'https:');
+    const swapped = url
+      .replace(/(\/stream\/\d+\/)259\//i, '$1258/')
+      .replace(/_259(\.[a-z0-9]+)(?=$|\?)/i, '_258$1');
+    return swapped === url ? '' : swapped;
+  }
+
+  /** note.video 顶层可能直接给播放地址的字段，判定与解析共用一份清单。 */
+  const VIDEO_DIRECT_URL_KEYS = ['url', 'videoUrl', 'playUrl', 'masterUrl'];
+
+  /**
+   * 判断 note.video 是否含可识别的视频线索。
+   * 视频笔记的 imageList 里常带一张封面，不能靠「有没有图片」判断类型，
+   * 否则会把封面当成整篇图集提供批量下载。
+   * @param {*} video
+   * @returns {boolean}
+   */
+  function hasVideoData(video) {
+    if (!video || typeof video !== 'object') return false;
+    const consumer = unwrap(video.consumer) || {};
+    if (consumer.originVideoKey || consumer.origin_video_key) return true;
+    const media = unwrap(video.media);
+    const stream = unwrap(media?.stream);
+    if (stream && typeof stream === 'object' && Object.keys(stream).length > 0) return true;
+    for (const key of VIDEO_DIRECT_URL_KEYS) {
+      if (typeof video[key] === 'string' && video[key].trim()) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 视频直链解析。无水印只有一条可信路径：consumer.originVideoKey 拼 bd 域名。
+   * media.stream 各档是网页播放器用的带水印流（_259），只能当最后兜底，并明确标记。
    * @param {object} video
-   * @returns {{ key: string, candidates: string[] }|null}
+   * @returns {{ key: string, candidates: { url: string, tier: string }[] }|null}
+   *   tier: 'clean' 确定无水印 / 'derived' 由 259→258 派生（疑似无水印）/ 'watermarked' 带水印
    */
   function parseVideo(video) {
     if (!video) return null;
     const consumer = unwrap(video.consumer) || {};
-    const originKey = consumer.originVideoKey;
-    if (typeof originKey === 'string' && originKey) {
-      return { key: 'origin', candidates: [`https://sns-video-bd.xhscdn.com/${originKey}`] };
+    // 不同端字段命名不一致，两种都要认，漏一种就会退化到带水印流。
+    const originKey = consumer.originVideoKey || consumer.origin_video_key
+      || video.originVideoKey || video.origin_video_key;
+
+    const candidates = [];
+    const seen = new Set();
+    const push = (url, tier) => {
+      const normalized = String(url).replace(/^http:/i, 'https:');
+      if (!isValidVideoUrl(normalized) || seen.has(normalized)) return;
+      seen.add(normalized);
+      candidates.push({ url: normalized, tier });
+    };
+
+    let sourceKey = 'stream';
+    if (typeof originKey === 'string' && originKey.trim()) {
+      // 从 HTML 源码正则提取时 \u002F 可能是字面量；读 __INITIAL_STATE__ 则已解码，这里兜底一次。
+      const key = originKey.trim().replace(/\\u002F/gi, '/').replace(/^\/+/, '');
+      sourceKey = 'origin';
+      if (/^https?:/i.test(key)) {
+        push(key, 'clean');
+      } else {
+        // bd 是原片域名，hw 作同 key 备用节点；两者都是无水印源片。
+        push(`https://sns-video-bd.xhscdn.com/${key}`, 'clean');
+        push(`https://sns-video-hw.xhscdn.com/${key}`, 'clean');
+      }
+    }
+
+    // 部分版本把播放地址直接放在 video 顶层，没有 consumer / stream。
+    // 这类地址通常也是播放器流，标 derived / watermarked，不冒充无水印原片。
+    for (const key of VIDEO_DIRECT_URL_KEYS) {
+      const direct = video[key];
+      if (typeof direct !== 'string' || !direct.trim()) continue;
+      const derived = deriveCleanVideoUrl(direct);
+      if (derived) push(derived, 'derived');
+      push(direct, 'watermarked');
     }
 
     const media = unwrap(video.media);
     const stream = unwrap(media?.stream);
-    if (!stream || typeof stream !== 'object') return null;
+    if (stream && typeof stream === 'object') {
+      // 清晰度档：分辨率/码率/体积都可能是 string，统一转数字再比较。
+      const tiers = [];
+      for (const [key, raw] of Object.entries(stream)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const tier = unwrap(raw);
+        const width = Number(tier.width) || 0;
+        const height = Number(tier.height) || 0;
+        const bitrate = Number(tier.avgBitrate || tier.videoBitrate) || 0;
+        const urls = [tier.masterUrl, tier.backupUrls]
+          .flat()
+          .filter((url) => typeof url === 'string' && url && isValidVideoUrl(url));
+        if (urls.length === 0) continue;
+        tiers.push({ key, width, height, bitrate, urls });
+      }
+      tiers.sort((a, b) => (b.height * b.width + b.bitrate) - (a.height * a.width + a.bitrate));
 
-    // 清晰度档：分辨率/码率/体积都可能是 string，统一转数字再比较，取最优。
-    const tiers = [];
-    for (const [key, raw] of Object.entries(stream)) {
-      if (!raw || typeof raw !== 'object') continue;
-      const tier = unwrap(raw);
-      const width = Number(tier.width) || 0;
-      const height = Number(tier.height) || 0;
-      const bitrate = Number(tier.avgBitrate || tier.videoBitrate) || 0;
-      const urls = [tier.masterUrl, tier.backupUrls]
-        .flat()
-        .filter((url) => typeof url === 'string' && url && isValidCdnUrl(url));
-      if (urls.length === 0) continue;
-      tiers.push({ key, width, height, bitrate, urls });
+      // 先放派生出的 258 候选，再放原始带水印流。
+      for (const tier of tiers) {
+        for (const url of tier.urls) {
+          const derived = deriveCleanVideoUrl(url);
+          if (derived) push(derived, 'derived');
+        }
+      }
+      for (const tier of tiers) {
+        for (const url of tier.urls) {
+          // 站点直接给出 258 地址时也是无水印流，别误标成带水印。
+          const isCleanStream = /\/258\/|_258\.[a-z0-9]+/i.test(url);
+          push(url, isCleanStream ? 'derived' : 'watermarked');
+        }
+      }
+      if (sourceKey === 'stream' && tiers.length > 0) sourceKey = tiers[0].key;
     }
-    if (tiers.length === 0) return null;
-    tiers.sort((a, b) => (b.height * b.width + b.bitrate) - (a.height * a.width + a.bitrate));
-    const best = tiers[0];
-    return { key: best.key, candidates: best.urls };
+
+    if (candidates.length === 0) return null;
+    const rank = { clean: 0, derived: 1, watermarked: 2 };
+    candidates.sort((a, b) => rank[a.tier] - rank[b.tier]);
+    return { key: sourceKey, candidates };
+  }
+
+  /**
+   * SSR 的 video 结构改版或拿不到直链时的降级路径：从 og:video / 页面 video 元素取播放地址。
+   * 拿到的通常是播放器用的带水印流，明确标记，不冒充无水印原片。
+   * @returns {{ key: string, candidates: { url: string, tier: string }[] }|null}
+   */
+  function parseVideoFromDom() {
+    const urls = [];
+    const collect = (raw) => {
+      const url = String(raw || '').trim().replace(/^http:/i, 'https:');
+      if (isValidVideoUrl(url)) urls.push(url);
+    };
+    collect(document.querySelector('meta[property="og:video"]')?.content);
+    collect(document.querySelector('meta[property="og:video:url"]')?.content);
+    const videos = document.querySelectorAll('video');
+    if (videos.length > 0) {
+      const el = videos[0];
+      collect(el.currentSrc);
+      collect(el.src);
+      for (const source of el.querySelectorAll('source')) collect(source.src);
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    const push = (url, tier) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      candidates.push({ url, tier });
+    };
+    for (const url of urls) push(deriveCleanVideoUrl(url), 'derived');
+    for (const url of urls) push(url, 'watermarked');
+    return candidates.length > 0 ? { key: 'dom', candidates } : null;
+  }
+
+  /**
+   * 判断 SSR 状态里的对象是不是一篇可用笔记。
+   * 视频笔记的 imageList 可能缺失或不是数组，不能用「imageList 是数组」当唯一门禁，
+   * 否则整篇笔记会被判无效，连视频解析都跑不到。
+   * @param {*} candidate
+   * @returns {boolean}
+   */
+  function looksLikeNote(candidate) {
+    if (!candidate || typeof candidate !== 'object') return false;
+    if (Array.isArray(unwrap(candidate.imageList))) return true;
+    const type = String(candidate.type || '').toLowerCase();
+    return type === 'video' || hasVideoData(unwrap(candidate.video));
   }
 
   /**
@@ -660,7 +831,7 @@
       for (const id of preferred) {
         const holder = unwrap(map[id]);
         const candidate = unwrap(holder?.note || holder?.noteInfo || holder);
-        if (candidate && Array.isArray(unwrap(candidate.imageList))) {
+        if (looksLikeNote(candidate)) {
           note = candidate;
           break;
         }
@@ -670,11 +841,12 @@
     if (!note) {
       const legacy = unwrap(state.noteData?.data?.noteData);
       const candidate = unwrap(legacy?.note || legacy);
-      if (candidate && Array.isArray(unwrap(candidate.imageList))) note = candidate;
+      if (looksLikeNote(candidate)) note = candidate;
     }
     if (!note) return null;
 
-    const list = unwrap(note.imageList) || [];
+    const rawList = unwrap(note.imageList);
+    const list = Array.isArray(rawList) ? rawList : [];
     const images = [];
     for (const raw of list) {
       const entry = unwrap(raw);
@@ -695,14 +867,27 @@
 
     const user = unwrap(note.user) || {};
     const type = String(note.type || '').toLowerCase();
-    const isVideo = type === 'video' || (images.length === 0 && !!note.video);
+    const rawVideo = unwrap(note.video);
+    const hasVideoObject = !!rawVideo && typeof rawVideo === 'object'
+      && Object.keys(rawVideo).length > 0;
+    // 视频笔记的 imageList 里常带一张封面，不能靠「有没有图片」判断类型：
+    // 否则 note.type 不是 'video' 时会被判成图文，把封面当整篇图集提供下载。
+    let isVideo = type === 'video' || hasVideoData(rawVideo);
+    let videoInfo = isVideo ? parseVideo(rawVideo) : null;
+    // SSR 改版后字段可能完全认不出（例如只剩 id），此时靠页面里的 og:video /
+    // video 元素兜底。只有 note.video 非空或 type 明确时才查，避免信息流里的
+    // 其它视频元素把图文笔记误判成视频。
+    if (!videoInfo && (type === 'video' || hasVideoObject)) {
+      videoInfo = parseVideoFromDom();
+      if (videoInfo) isVideo = true;
+    }
     return {
       id: noteId || String(note.noteId || note.note_id || note.id || ''),
       title: String(note.title || note.displayTitle || '').trim(),
       author: String(user.nickname || user.nickName || '').trim(),
       images: dedupeImages(images),
       type: isVideo ? 'video' : 'image',
-      video: isVideo ? parseVideo(unwrap(note.video)) : null,
+      video: videoInfo,
       source: 'state',
     };
   }
@@ -728,7 +913,9 @@
       .filter((url) => isValidCdnUrl(url));
     const og = document.querySelector('meta[property="og:image"]');
     if (og && isValidCdnUrl(og.content || '')) urls.push(og.content);
-    if (urls.length === 0) return null;
+    // 视频笔记可能没有 img（或只有封面），别因为找不到图片就丢弃整篇笔记。
+    const videoInfo = parseVideoFromDom();
+    if (urls.length === 0 && !videoInfo) return null;
 
     const titleEl = document.querySelector('#detail-title, .title, h1');
     return {
@@ -736,8 +923,8 @@
       title: String(titleEl?.textContent || document.title || '').trim(),
       author: '',
       images: dedupeImages(urls.map(makeImage)).slice(0, 30),
-      type: 'image',
-      video: null,
+      type: videoInfo ? 'video' : 'image',
+      video: videoInfo,
       source: 'dom',
     };
   }
@@ -750,9 +937,14 @@
     } catch (err) {
       warn('解析页面状态失败，改用 DOM 降级', err);
     }
-    if (note && note.images.length > 0) return note;
+    // 视频笔记可能没有封面（images 为空），此时绝不能掉进 DOM 降级被改成图文笔记。
+    const hasVideo = (note?.video?.candidates?.length ?? 0) > 0;
+    if (note && (note.images.length > 0 || hasVideo)) return note;
     try {
-      return collectFromDom() || note;
+      const fallback = collectFromDom();
+      // 兜底：SSR 已解析出视频但 DOM 降级只找到封面时，保留视频信息。
+      if (fallback && hasVideo) return { ...fallback, type: 'video', video: note.video };
+      return fallback || note;
     } catch (err) {
       warn('DOM 降级失败', err);
       return note;
@@ -1055,6 +1247,8 @@
     note: null,
     hasNoteRoot: false,
     refreshTimer: 0,
+    probeTimer: 0,
+    probeRemaining: 0,
     noteObserver: null,
     ui: null,
     cancelRequested: false,
@@ -1183,6 +1377,8 @@
         font-size: 12px;
         cursor: pointer;
       }
+      /* 作者样式的 display 会盖过 UA 的 [hidden]，必须显式声明才能藏住。 */
+      .s4tm-xhs-option[hidden] { display: none; }
       .s4tm-xhs-check { margin: 0; accent-color: #ff2442; }
       .s4tm-xhs-progress {
         height: 4px;
@@ -1258,6 +1454,7 @@
         font-size: 12px;
         color: #595959;
       }
+      .s4tm-xhs-grid-actions[hidden] { display: none; }
       .s4tm-xhs-grid-actions button {
         border: 0;
         background: none;
@@ -1300,14 +1497,19 @@
   function renderMeta() {
     const note = state.note;
     const count = note?.images.length ?? 0;
-    if (state.ui?.count) state.ui.count.textContent = String(count);
+    const isVideo = note?.type === 'video';
+    // 角标只表示「可批量下载的图片数」；视频笔记的封面不计入。
+    if (state.ui?.count) state.ui.count.textContent = isVideo ? '0' : String(count);
     if (state.ui?.title) {
       state.ui.title.textContent = note?.title || '尚未识别到笔记';
     }
     if (state.ui?.meta) {
       const from = note?.source === 'dom' ? '页面元素（降级）' : '页面数据';
-      if (note?.type === 'video' && count === 0) {
-        state.ui.meta.textContent = '视频笔记 · 点「下载视频」保存原片';
+      if (isVideo) {
+        const hasVideo = (note.video?.candidates?.length ?? 0) > 0;
+        state.ui.meta.textContent = hasVideo
+          ? '视频笔记 · 请用视频按钮；封面仅为静态帧'
+          : '视频笔记 · 未解析到视频地址（检查登录态 / 站点改版），可下载封面';
       } else {
         state.ui.meta.textContent = count > 0
           ? `共 ${count} 张 · 来源：${from}`
@@ -1316,16 +1518,37 @@
     }
     renderGrid();
     renderVideoButton();
+    applyNoteMode(note);
   }
 
-  /** 预览网格：勾选要下载的图，切笔记时清空勾选。 */
+  /**
+   * 按笔记类型切换面板模式。视频笔记的 imageList 只是封面（静态帧），
+   * 不能混进「图片批量下载」入口，否则点 ZIP 拿到的是封面而不是视频。
+   * @param {object|null} note
+   */
+  function applyNoteMode(note) {
+    const ui = state.ui;
+    if (!ui) return;
+    const isVideo = note?.type === 'video';
+    const hasImages = (note?.images?.length ?? 0) > 0;
+    // 单张封面没必要打包成 ZIP；逐张按钮改名，避免误当成整篇图集。
+    ui.zipBtn.hidden = isVideo;
+    ui.eachBtn.hidden = !hasImages;
+    ui.eachBtn.textContent = isVideo ? '下载封面（静态图）' : '逐张保存';
+    ui.grid.hidden = isVideo || !hasImages;
+    ui.gridActions.hidden = isVideo || !hasImages;
+    // 多源择优只作用于图片，视频笔记下隐藏免得误导。
+    ui.option.hidden = isVideo;
+  }
+
+  /** 预览网格：勾选要下载的图，切笔记时清空勾选。视频笔记的封面不进网格。 */
   function renderGrid() {
     const grid = state.ui?.grid;
     const note = state.note;
     if (!grid) return;
     grid.textContent = '';
 
-    const images = note?.images || [];
+    const images = note?.type === 'video' ? [] : (note?.images || []);
     if (images.length === 0) {
       grid.hidden = true;
       state.selection.clear();
@@ -1373,13 +1596,48 @@
   function renderVideoButton() {
     const btn = state.ui?.videoBtn;
     if (!btn) return;
-    const hasVideo = !!state.note?.video && state.note.video.candidates.length > 0;
+    const candidates = state.note?.video?.candidates ?? [];
+    const hasVideo = candidates.length > 0;
     btn.hidden = !hasVideo;
+    if (!hasVideo) return;
+    // 点之前就说清楚能拿到什么，不把带水印流冒充「原片」。
+    if (candidates.some((item) => item.tier === 'clean')) {
+      btn.textContent = '下载无水印视频';
+    } else if (candidates.some((item) => item.tier === 'derived')) {
+      btn.textContent = '下载视频（尝试无水印）';
+    } else {
+      btn.textContent = '下载视频（可能带水印）';
+    }
+  }
+
+  /**
+   * 首屏笔记数据常由客户端异步填充，容器却一直存在，
+   * 只靠 MutationObserver 的「容器出现/消失」不会重新解析。
+   * 数据未就绪时做有限次重查，拿到可用内容或次数耗尽即停，避免无限滚动持续开销。
+   */
+  function scheduleProbe() {
+    const note = state.note;
+    const usable = note && (note.images.length > 0
+      || (note.video?.candidates?.length ?? 0) > 0);
+    if (usable) {
+      state.probeRemaining = 0;
+      clearLater(state.probeTimer);
+      state.probeTimer = 0;
+      return;
+    }
+    if (state.probeRemaining <= 0) return;
+    state.probeRemaining -= 1;
+    clearLater(state.probeTimer);
+    state.probeTimer = later(() => {
+      state.probeTimer = 0;
+      refresh();
+    }, CONFIG.probeInterval);
   }
 
   function refresh() {
     state.note = resolveNote();
     renderMeta();
+    scheduleProbe();
   }
 
   /** @param {'zip'|'each'} mode @param {object[]} [selectedImages] */
@@ -1394,7 +1652,7 @@
     }
     const allImages = note.images || [];
     if (allImages.length === 0) {
-      setStatus('没找到图片：可能是视频笔记，请点「下载视频」。', 'warn');
+      setStatus('没找到图片：可能是视频笔记，请点面板里的视频按钮。', 'warn');
       return;
     }
 
@@ -1539,7 +1797,7 @@
     }
   }
 
-  /** 下载视频：取 originVideoKey 或 stream 最优档，落到 mp4。 */
+  /** 下载视频：优先无水印原片，退化到带水印流时明确告警，落到 mp4。 */
   async function downloadVideo() {
     if (state.busy) return;
     refresh();
@@ -1549,19 +1807,27 @@
       return;
     }
 
+    const candidates = note.video.candidates;
+    const hasClean = candidates.some((item) => item.tier === 'clean');
     state.busy = true;
     setButtonsEnabled(false);
     setProgress(0, 1);
-    setStatus('正在取视频原片…', 'info');
+    setStatus(hasClean ? '正在取无水印原片…' : '未暴露原片标识，正在尝试无水印流…', 'info');
 
     try {
       let blob = null;
-      for (const url of note.video.candidates) {
+      let hitTier = '';
+      // candidates 已按 clean → derived → watermarked 排序，命中即用。
+      for (const item of candidates) {
         try {
-          blob = await fetchBlob(url, null, 'video/mp4,video/*,*/*;q=0.8');
-          if (blob && blob.size >= 1024) break;
+          const result = await fetchBlob(item.url, null, 'video/mp4,video/*,*/*;q=0.8');
+          if (result && result.size >= 1024) {
+            blob = result;
+            hitTier = item.tier;
+            break;
+          }
         } catch (err) {
-          log('视频候选源不可用', url, err.message);
+          log('视频候选源不可用', item.tier, item.url, err.message);
         }
       }
       if (!blob) {
@@ -1571,7 +1837,21 @@
       const base = buildBaseName(note);
       saveBlob(blob, `${base}.mp4`);
       setProgress(1, 1);
-      setStatus(`完成：视频已下载（${(blob.size / 1048576).toFixed(1)}MB）。`, 'ok');
+      const sizeText = `${(blob.size / 1048576).toFixed(1)}MB`;
+      if (hitTier === 'clean') {
+        setStatus(`完成：无水印原片已下载（${sizeText}）。`, 'ok');
+      } else if (hitTier === 'derived') {
+        setStatus(
+          `完成：视频已下载（${sizeText}）。命中 258 无水印流，通常无水印，请自行核对画面。`,
+          'warn',
+        );
+      } else {
+        setStatus(
+          `完成：视频已下载（${sizeText}），但只拿到带水印的播放流。该笔记未暴露无水印原片，`
+          + '可登录后再试，或向作者索取原文件。',
+          'warn',
+        );
+      }
     } catch (err) {
       warn('视频下载失败', err);
       setStatus(`视频下载失败：${err.message}`, 'warn');
@@ -1595,6 +1875,7 @@
     const host = document.createElement('div');
     host.id = PANEL_ID;
     host.dataset.s4tm = 'xhs-downloader';
+    host.dataset.s4tmVersion = SCRIPT_VERSION;
     host.setAttribute(MOUNTED_ATTR, '1');
 
     const card = document.createElement('div');
@@ -1668,7 +1949,7 @@
 
     state.ui = {
       host, card, fab, count, title, meta, videoBtn, zipBtn, eachBtn, cancelBtn,
-      grid, checkbox, progress: progressFill, status, lastNoteId: null,
+      grid, gridActions, option, checkbox, progress: progressFill, status, lastNoteId: null,
     };
 
     /** 取当前勾选的图片对象；没勾选时返回空数组（downloadAll 里会回退到全选）。 */
@@ -1771,7 +2052,10 @@
     state.noteObserver?.disconnect();
     state.noteObserver = null;
     clearLater(state.refreshTimer);
+    clearLater(state.probeTimer);
     state.refreshTimer = 0;
+    state.probeTimer = 0;
+    state.probeRemaining = 0;
 
     // 取消在途下载，让 downloadAll 的 finally 有机会释放 buffer
     state.cancelRequested = true;
@@ -1804,11 +2088,13 @@
 
   async function mount() {
     if (document.getElementById(PANEL_ID)) {
+      state.probeRemaining = CONFIG.probeMax;
       refresh();
       return;
     }
     injectPanelStyle();
     createPanel();
+    state.probeRemaining = CONFIG.probeMax;
     refresh();
     log('挂载完成');
   }
@@ -1821,7 +2107,8 @@
     try {
       safeMount();
       onUrlChange(() => {
-        // 面板常驻，路由变化只刷新当前笔记数据，不重复注入。
+        // 面板常驻，路由变化只刷新当前笔记数据，不重复注入；重新给异步数据一段探测窗口。
+        state.probeRemaining = CONFIG.probeMax;
         refresh();
       });
       observeNoteRoot();
