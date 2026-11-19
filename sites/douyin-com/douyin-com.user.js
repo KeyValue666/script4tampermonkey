@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 抖音网页版 · 清爽省流
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/douyin-com
-// @version      0.1.5
+// @version      0.2.1
 // @description  刷视频去广告与营销弹窗、看直播只留画面和弹幕，并拦截埋点广告请求与预加载开销
 // @author       KeyValue666
 // @match        https://www.douyin.com/*
@@ -30,8 +30,19 @@
   const MODE_ATTR = 'data-s4tm-mode';
   const HIDDEN_ATTR = 'data-s4tm-hidden';
   const AD_ATTR = 'data-s4tm-ad';
+  const BLOCK_ATTR = 'data-s4tm-block';
 
   const MODE = { VIDEO: 'video', LIVE: 'live', BROWSE: 'browse' };
+
+  /** 屏蔽规则的三个维度：作者名必须全等，文案与话题按包含匹配 */
+  const RULE_SCOPES = { NAME: 'name', DESC: 'desc', TAG: 'tag' };
+  const RULE_KEYS = {
+    keywords: 'blockKeywords',
+    authors: 'blockAuthors',
+    whitelist: 'whiteAuthors',
+    markedAds: 'markedAds',
+    allowed: 'allowedVideos',
+  };
 
   const CONFIG = {
     /** 本地调试时改 true；提交前必须恢复为 false */
@@ -56,6 +67,13 @@
     blockPrefetch: true,
     /** 离屏视频暂停并关闭预加载，降低解码开销 */
     limitOffscreenVideo: true,
+    /** 用户自定义规则的数量上限，防止 localStorage 被写满 */
+    maxKeywords: 200,
+    maxBlockedAuthors: 500,
+    maxMarkedAds: 2000,
+    maxAllowedVideos: 200,
+    /** 跳过广告后的撤销提示保留时间（毫秒） */
+    undoToastMs: 5000,
   };
 
   /*
@@ -293,6 +311,20 @@
       vertical-align: 1px;
     }
 
+    /* 规则按钮独占一行：它是面板开关，不是状态开关，不该混在网格里当第 6 个灯 */
+    #s4tm-douyin-com-bar .s4tm-toggle--rules {
+      grid-column: 1 / -1;
+      border-color: rgba(255, 255, 255, 0.14);
+      background: rgba(255, 255, 255, 0.06);
+      color: #cfd5e0;
+    }
+    #s4tm-douyin-com-bar .s4tm-toggle--rules::before { display: none; }
+    #s4tm-douyin-com-bar .s4tm-toggle--rules[aria-pressed="true"] {
+      border-color: rgba(45, 211, 111, 0.4);
+      background: rgba(45, 211, 111, 0.14);
+      color: #9df0be;
+    }
+
     #s4tm-douyin-com-bar .s4tm-toggle--guard {
       min-width: 0;
       text-align: center;
@@ -397,8 +429,154 @@
 
     /* 站点节点只按标记隐藏；去掉 html 上的 clean 属性即可完整还原 */
     html[data-s4tm-clean="1"] [data-s4tm-hidden="1"],
-    html[data-s4tm-clean="1"] [data-s4tm-ad="1"] {
+    html[data-s4tm-clean="1"] [data-s4tm-ad="1"],
+    html[data-s4tm-clean="1"] [data-s4tm-block="1"] {
       display: none !important;
+    }
+
+    /* 规则面板：默认收起，展开后跟工具条一起走，避免第二个浮层的拖拽与避让 */
+    #s4tm-douyin-com-bar .s4tm-rules {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      padding-top: 10px;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules[hidden] { display: none; }
+    #s4tm-douyin-com-bar .s4tm-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    #s4tm-douyin-com-bar .s4tm-section__title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #9aa2b1;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    #s4tm-douyin-com-bar .s4tm-section__title em {
+      color: #6f7683;
+      font-size: 10px;
+      font-style: normal;
+      font-weight: 400;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+    /* 动作按钮改用浅底 + 正常字色，和上面深色开关区分开 */
+    #s4tm-douyin-com-bar .s4tm-rules__row .s4tm-toggle {
+      background: rgba(255, 255, 255, 0.07);
+      color: #e6e9ef;
+      text-align: center;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__row .s4tm-toggle:hover {
+      background: rgba(37, 244, 238, 0.14);
+      color: #7ff7f1;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__row .s4tm-toggle::before { display: none; }
+    #s4tm-douyin-com-bar .s4tm-rules__list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      max-height: 108px;
+      overflow-y: auto;
+      padding: 4px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.28);
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 6px;
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 11px;
+    }
+    /* 关键：display:flex 会盖掉 hidden 的浏览器默认样式，必须显式覆盖 */
+    #s4tm-douyin-com-bar .s4tm-rules__item[hidden] { display: none; }
+    #s4tm-douyin-com-bar .s4tm-rules__item span {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__item button {
+      flex: none;
+      width: 18px;
+      height: 18px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: #ff9bb0;
+      font: inherit;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__item button:hover {
+      background: rgba(255, 155, 176, 0.16);
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__empty {
+      padding: 10px 6px;
+      color: #6f7683;
+      font-size: 11px;
+      text-align: center;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__add { display: flex; gap: 6px; }
+    #s4tm-douyin-com-bar .s4tm-rules__add input {
+      flex: 1;
+      min-width: 0;
+      box-sizing: border-box;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      padding: 5px 7px;
+      background: rgba(0, 0, 0, 0.3);
+      color: #f2f3f5;
+      font: inherit;
+      font-size: 11px;
+      cursor: text;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__add .s4tm-toggle {
+      background: #2dd36f;
+      color: #10231a;
+      font-weight: 600;
+    }
+    #s4tm-douyin-com-bar .s4tm-rules__add .s4tm-toggle::before { display: none; }
+    #s4tm-douyin-com-bar .s4tm-undo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: rgba(45, 211, 111, 0.14);
+      color: #9df0be;
+      font-size: 11px;
+    }
+    #s4tm-douyin-com-bar .s4tm-undo[hidden] { display: none; }
+    #s4tm-douyin-com-bar .s4tm-undo span {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #s4tm-douyin-com-bar .s4tm-undo button {
+      flex: none;
+      border: 0;
+      border-radius: 5px;
+      padding: 2px 8px;
+      background: #2dd36f;
+      color: #10231a;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
     }
 
     /* 只在推荐流列表内收起直播卡片，避免误伤点开的直播间弹层 */
@@ -458,8 +636,10 @@
     guardEnabled: true,
     perfEnabled: true,
     skipAdsEnabled: true,
+    blockEnabled: false,
     blockedCount: 0,
     adCount: 0,
+    filteredCount: 0,
     countTimer: 0,
     bar: null,
     buttons: {},
@@ -469,6 +649,17 @@
     barPinned: false,
     avoidScheduled: false,
     lastAvoidAt: 0,
+    rulePanelOpen: false,
+    undoSkipped: null,
+    undoTimer: 0,
+    /** 规则用数组持久化、Set 做查找索引；只存字符串，不持有 DOM 或响应对象 */
+    rules: { keywords: [], authors: [], whitelist: [], markedAds: [], allowed: [] },
+    ruleIndex: {
+      authors: new Set(),
+      whitelist: new Set(),
+      markedAds: new Set(),
+      allowed: new Set(),
+    },
   };
 
   /* ---------- 工具 ---------- */
@@ -672,6 +863,11 @@
     scheduleBarUpdate();
   }
 
+  function countFiltered(removed) {
+    state.filteredCount += removed;
+    scheduleBarUpdate();
+  }
+
   /** 计数只用于按钮文案，防抖避免高频 DOM 写入 */
   function scheduleBarUpdate() {
     if (state.countTimer) return;
@@ -793,6 +989,179 @@
     return MODE.VIDEO;
   }
 
+  /* ---------- 业务：用户自定义屏蔽规则 ---------- */
+
+  /**
+   * 从 aweme 条目里抽出稳定标识与可匹配文本。字段名带多套兼容写法，
+   * 抖音改版换其中一种时规则不会整批失效。
+   * @param {unknown} item
+   * @returns {{ vid: string, authorId: string, nickname: string,
+   *   desc: string, tags: string[] } | null}
+   */
+  function extractItemInfo(item) {
+    if (!item || typeof item !== 'object') return null;
+    const author = item.author && typeof item.author === 'object' ? item.author : {};
+    const desc = item.desc ?? item.title;
+    const tags = [];
+    for (const key of ['text_extra', 'extra']) {
+      const extras = item[key];
+      if (!Array.isArray(extras)) continue;
+      for (const extra of extras) {
+        const tag = extra && (extra.hashtag_name || extra.hashtagName);
+        if (typeof tag === 'string' && tag) tags.push(tag);
+      }
+    }
+    return {
+      vid: String(item.aweme_id ?? item.awemeId ?? item.group_id ?? ''),
+      authorId: String(author.uid ?? author.sec_uid ?? author.id ?? ''),
+      nickname: typeof author.nickname === 'string' ? author.nickname : '',
+      desc: typeof desc === 'string' ? desc : '',
+      tags,
+    };
+  }
+
+  /** 重建 Set 索引：规则数量有硬上限，全量重建比增量同步更不容易出错 */
+  function rebuildRuleIndex() {
+    state.ruleIndex.authors = new Set(
+      state.rules.authors.map((item) => item.id).filter(Boolean),
+    );
+    state.ruleIndex.whitelist = new Set(
+      state.rules.whitelist.map((item) => item.id).filter(Boolean),
+    );
+    state.ruleIndex.markedAds = new Set(state.rules.markedAds.filter(Boolean));
+    state.ruleIndex.allowed = new Set(state.rules.allowed.filter(Boolean));
+  }
+
+  /** 只保留结构正确的数据，避免手改 localStorage 后整页报错 */
+  function sanitizeRules(name, raw) {
+    if (!Array.isArray(raw)) return [];
+    if (name === 'keywords') {
+      return raw.filter((item) => item && typeof item.text === 'string' && item.text
+        && Array.isArray(item.scopes))
+        .slice(0, CONFIG.maxKeywords)
+        .map((item) => ({
+          text: item.text.slice(0, 40),
+          scopes: item.scopes.filter((scope) => Object.values(RULE_SCOPES).includes(scope)),
+        }));
+    }
+    if (name === 'authors' || name === 'whitelist') {
+      return raw.filter((item) => item && typeof item.id === 'string' && item.id)
+        .slice(0, CONFIG.maxBlockedAuthors)
+        .map((item) => ({
+          id: item.id.slice(0, 64),
+          name: typeof item.name === 'string' ? item.name.slice(0, 40) : '',
+        }));
+    }
+    const limit = name === 'markedAds' ? CONFIG.maxMarkedAds : CONFIG.maxAllowedVideos;
+    return raw.filter((item) => typeof item === 'string' && item)
+      .slice(0, limit)
+      .map((item) => item.slice(0, 64));
+  }
+
+  function loadRules() {
+    for (const [name, storeKey] of Object.entries(RULE_KEYS)) {
+      state.rules[name] = sanitizeRules(name, store.get(storeKey, []));
+    }
+    rebuildRuleIndex();
+  }
+
+  function saveRules(name) {
+    store.set(RULE_KEYS[name], state.rules[name]);
+    rebuildRuleIndex();
+  }
+
+  /**
+   * 添加一条规则。白名单 / 放行优先的规则仍限制条数，防止本地存储被写满。
+   * @param {keyof state.rules} name
+   * @param {unknown} value
+   * @returns {boolean} 是否真的新增
+   */
+  function addRule(name, value, limit) {
+    const list = state.rules[name];
+    const exists = name === 'keywords'
+      ? list.some((item) => item.text === value.text
+        && item.scopes.slice().sort().join() === value.scopes.slice().sort().join())
+      : list.includes(value);
+    if (exists) return false;
+    if (list.length >= limit) {
+      warn('规则数量已达上限', name, limit);
+      return false;
+    }
+    list.push(value);
+    saveRules(name);
+    return true;
+  }
+
+  /**
+   * 删除一条规则。关键词按文本匹配，其余按 id / 值匹配。
+   * @param {keyof state.rules} name
+   * @param {string} value
+   */
+  function removeRule(name, value) {
+    const list = state.rules[name];
+    const index = list.findIndex((item) => (
+      typeof item === 'string' ? item === value : (item.id === value || item.text === value)
+    ));
+    if (index === -1) return;
+    list.splice(index, 1);
+    saveRules(name);
+    log('规则已删除', name, value);
+  }
+
+  /**
+   * 对单条内容套用用户规则。白名单与本条放行优先于一切屏蔽；
+   * 手动标记的广告即使站点没打广告字段也按广告处理。
+   * @param {ReturnType<typeof extractItemInfo>} info
+   * @returns {'allow' | 'block' | null}
+   */
+  function matchUserRules(info) {
+    if (!info) return null;
+    if (state.ruleIndex.allowed.has(info.vid)) return 'allow';
+    if (info.authorId && state.ruleIndex.whitelist.has(info.authorId)) return 'allow';
+    if (info.vid && state.ruleIndex.markedAds.has(info.vid)) return 'block';
+    if (!state.blockEnabled) return null;
+    if (info.authorId && state.ruleIndex.authors.has(info.authorId)) return 'block';
+
+    for (const rule of state.rules.keywords) {
+      const needle = rule.text.toLowerCase();
+      if (rule.scopes.includes(RULE_SCOPES.NAME)
+        && info.nickname.toLowerCase() === needle) return 'block';
+      if (rule.scopes.includes(RULE_SCOPES.DESC)
+        && info.desc.toLowerCase().includes(needle)) return 'block';
+      if (rule.scopes.includes(RULE_SCOPES.TAG)
+        && info.tags.some((tag) => tag.toLowerCase().includes(needle))) return 'block';
+    }
+    return null;
+  }
+
+  /**
+   * 从卡片 DOM 读取可匹配信息。文字兜底只在数据层没覆盖到时使用，
+   * 因此只认作者链接与描述节点这两个稳定特征，不做整卡文本模糊扫描。
+   * @param {Element} [card]
+   * @returns {{ vid: string, authorId: string, nickname: string,
+   *   desc: string, tags: string[] } | null}
+   */
+  function readCardInfo(card) {
+    const active = card || document.querySelector('[data-e2e="feed-active-video"]');
+    if (!active) return null;
+    const owner = active.closest('[data-e2e="feed-item"]') || active;
+    const author = owner.querySelector('a[href*="/user/"]');
+    const href = author ? (author.getAttribute('href') || '') : '';
+    const matched = href.match(/\/user\/([^/?#]+)/);
+    const descEl = owner.querySelector('[data-e2e="video-desc"], [data-e2e="desc"]');
+    const desc = descEl ? (descEl.textContent || '').trim() : '';
+    const tags = [];
+    for (const part of desc.match(/#([^\s#]+)/g) || []) tags.push(part.slice(1));
+    return {
+      vid: active.getAttribute('data-e2e-vid')
+        || owner.getAttribute('data-e2e-vid') || '',
+      authorId: matched ? matched[1] : '',
+      nickname: author ? (author.textContent || '').trim() : '',
+      desc,
+      tags,
+    };
+  }
+
   /* ---------- 业务：推荐流广告数据过滤 ---------- */
 
   /**
@@ -828,43 +1197,70 @@
   }
 
   /**
-   * 剔除推荐流响应里的广告条目；全被剔除或不是 feed 结构时原样返回。
+   * 剔除推荐流响应里的广告与命中用户规则的条目；全被剔除或不是 feed
+   * 结构时原样返回。白名单 / 本条放行优先于广告与屏蔽规则。
    * @param {string} text
-   * @returns {{ text: string, removed: number }}
+   * @returns {{ text: string, ads: number, filtered: number }}
    */
   function filterFeedPayload(text) {
-    if (typeof text !== 'string' || !text.trim().startsWith('{')) {
-      return { text, removed: 0 };
-    }
-    if (!AD_FIELD_RE.test(text)) return { text, removed: 0 };
+    const none = { text, ads: 0, filtered: 0 };
+    if (typeof text !== 'string' || !text.trim().startsWith('{')) return none;
+    // 没有任何规则启用时保留原来的快速预检，不做无谓的整包 JSON 解析
+    const hasRules = state.blockEnabled
+      || state.ruleIndex.markedAds.size > 0
+      || state.ruleIndex.allowed.size > 0
+      || state.ruleIndex.whitelist.size > 0;
+    if (!hasRules && !AD_FIELD_RE.test(text)) return none;
     let data;
     try {
       data = JSON.parse(text);
     } catch (err) {
-      return { text, removed: 0 };
+      return none;
     }
 
     const lists = findFeedLists(data);
-    if (!lists.length) return { text, removed: 0 };
+    if (!lists.length) return none;
 
-    let removed = 0;
+    let ads = 0;
+    let filtered = 0;
     for (const list of lists) {
-      const adIndexes = [];
+      const removeIndexes = [];
+      let adsInList = 0;
+      let filteredInList = 0;
       for (let i = 0; i < list.length; i += 1) {
-        if (isAdItem(list[i])) adIndexes.push(i);
+        // 完全没有用户规则时走原来的快路径，不给每条内容构造匹配对象
+        if (!hasRules) {
+          if (isAdItem(list[i])) {
+            removeIndexes.push(i);
+            adsInList += 1;
+          }
+          continue;
+        }
+        const verdict = matchUserRules(extractItemInfo(list[i]));
+        if (verdict === 'allow') continue;
+        if (verdict === 'block') {
+          removeIndexes.push(i);
+          filteredInList += 1;
+        } else if (isAdItem(list[i])) {
+          removeIndexes.push(i);
+          adsInList += 1;
+        }
       }
       // 留空会让站点认为推荐流异常，宁可这一页不剔
-      if (adIndexes.length === 0 || adIndexes.length === list.length) continue;
+      if (!removeIndexes.length || removeIndexes.length === list.length) continue;
       // 倒序删除，避免展开超大数组时触发参数数量上限
-      for (let i = adIndexes.length - 1; i >= 0; i -= 1) list.splice(adIndexes[i], 1);
-      removed += adIndexes.length;
+      for (let i = removeIndexes.length - 1; i >= 0; i -= 1) {
+        list.splice(removeIndexes[i], 1);
+      }
+      ads += adsInList;
+      filtered += filteredInList;
     }
 
-    if (!removed) return { text, removed: 0 };
+    if (!ads && !filtered) return none;
     try {
-      return { text: JSON.stringify(data), removed };
+      return { text: JSON.stringify(data), ads, filtered };
     } catch (err) {
-      return { text, removed: 0 };
+      return none;
     }
   }
 
@@ -885,8 +1281,9 @@
     try {
       const original = await response.clone().text();
       const result = filterFeedPayload(original);
-      if (!result.removed) return response;
-      countAds(result.removed);
+      if (!result.ads && !result.filtered) return response;
+      countAds(result.ads);
+      countFiltered(result.filtered);
       const headers = new Headers(response.headers);
       headers.delete('content-length');
       headers.delete('content-encoding');
@@ -967,9 +1364,10 @@
       if (cached && cached.fp === fingerprint) return cached.text;
 
       const result = filterFeedPayload(raw);
-      if (result.removed && !XHR_COUNTED.has(instance)) {
+      if ((result.ads || result.filtered) && !XHR_COUNTED.has(instance)) {
         XHR_COUNTED.add(instance);
-        countAds(result.removed);
+        countAds(result.ads);
+        countFiltered(result.filtered);
       }
       if (raw.length <= CONFIG.maxCachedResponse) {
         XHR_CACHE.set(instance, { fp: fingerprint, text: result.text });
@@ -1253,9 +1651,25 @@
     }
   }
 
+  /**
+   * DOM 兜底：数据层没覆盖到的接口（如新搜索接口）靠卡片文本匹配规则。
+   * 只打标记不删节点；白名单与本条放行命中时撤掉标记，避免误伤后无法恢复。
+   * @param {Element} card
+   */
+  function applyUserRulesToCard(card) {
+    if (!card.getAttribute('data-e2e-vid') && !card.querySelector('a[href*="/user/"]')) return;
+    const verdict = matchUserRules(readCardInfo(card));
+    if (verdict === 'block') card.setAttribute(BLOCK_ATTR, '1');
+    else if (verdict === 'allow') card.removeAttribute(BLOCK_ATTR);
+  }
+
   /** 只给精确短文案 / 明确语义属性打标记，不删站点节点，便于一键还原 */
   function classifyClutter(el) {
     if (el.hasAttribute(HIDDEN_ATTR) || el.hasAttribute(AD_ATTR)) return;
+    if ((state.blockEnabled || state.ruleIndex.markedAds.size)
+      && el.getAttribute('data-e2e') === 'feed-item') {
+      applyUserRulesToCard(el);
+    }
     // 弹幕列表、输入框与发言按钮属于「互动」，一律不动
     if (el.closest('[class*="chatroom"], [contenteditable="true"], input, textarea')) return;
 
@@ -1349,29 +1763,47 @@
 
   /**
    * React 虚拟列表会复用卡片 DOM。标记留在节点上会把后续正常视频也隐藏，
-   * 因此每批复查一次已标记的卡片，角标消失就撤掉标记。
+   * 因此每批复查一次已标记的卡片：角标消失或命中白名单就撤掉标记。
    */
   function refreshAdCards() {
     if (!state.cleanEnabled || state.mode === MODE.BROWSE) return;
     const cards = document.querySelectorAll(
-      `[${AD_ATTR}][data-e2e="feed-item"], [${AD_ATTR}][data-e2e="feed-live"]`,
+      `[${AD_ATTR}][data-e2e="feed-item"], [${AD_ATTR}][data-e2e="feed-live"], `
+      + `[${BLOCK_ATTR}][data-e2e="feed-item"]`,
     );
     const limit = Math.min(cards.length, 60);
     for (let i = 0; i < limit; i += 1) {
-      if (!hasAdBadge(cards[i])) cards[i].removeAttribute(AD_ATTR);
+      const card = cards[i];
+      if (card.hasAttribute(AD_ATTR) && !hasAdBadge(card)) card.removeAttribute(AD_ATTR);
+      if (card.hasAttribute(BLOCK_ATTR)) {
+        const verdict = matchUserRules(readCardInfo(card));
+        if (verdict !== 'block') card.removeAttribute(BLOCK_ATTR);
+      }
     }
   }
 
-  /** 当前视频确实是广告卡片时静音并切下一条 */
+  /**
+   * 当前视频命中用户屏蔽规则或确实是广告卡片时静音并切下一条。
+   * 白名单与本条放行优先：命中后不跳，并撤掉可能存在的屏蔽标记。
+   */
   function pruneActiveAd() {
-    if (!state.skipAdsEnabled || !state.cleanEnabled || state.mode !== MODE.VIDEO) return;
+    if (!state.cleanEnabled || state.mode !== MODE.VIDEO) return;
     const active = document.querySelector('[data-e2e="feed-active-video"]');
     if (!active) return;
-    const card = active.closest('[data-e2e="feed-item"], [data-e2e="feed-live"]');
-    if (!card || !card.hasAttribute(AD_ATTR) || !hasAdBadge(card)) return;
+    const card = active.closest('[data-e2e="feed-item"]') || active;
+    const info = readCardInfo(card);
+    const verdict = matchUserRules(info);
+    if (verdict === 'allow') {
+      card.removeAttribute(BLOCK_ATTR);
+      return;
+    }
+    const isBlocked = verdict === 'block';
+    const isAd = !isBlocked && state.skipAdsEnabled
+      && card.hasAttribute(AD_ATTR) && hasAdBadge(card);
+    if (!isBlocked && !isAd) return;
 
-    // 按视频 id 去重：卡片 DOM 被复用时，换了一条新广告仍能再跳
-    const vid = active.getAttribute('data-e2e-vid') || '';
+    // 按视频 id 去重：卡片 DOM 被复用时，换了一条新内容仍能再跳
+    const vid = info && info.vid ? info.vid : '';
     if (vid && vid === state.lastSkippedVid) return;
     state.lastSkippedVid = vid;
 
@@ -1381,13 +1813,14 @@
       try {
         video.pause();
       } catch (err) {
-        log('广告视频暂停失败');
+        log('视频暂停失败');
       }
     }
     const next = document.querySelector('[data-e2e="video-switch-next-arrow"]');
     if (next) {
       next.click();
-      log('跳过广告卡片');
+      if (vid) showUndo(vid, info && info.nickname ? info.nickname : '');
+      log(isBlocked ? '按规则跳过' : '跳过广告卡片');
     }
   }
 
@@ -1486,10 +1919,12 @@
 
   const HOTKEY_STATE = {
     h: 'cleanEnabled', p: 'guardEnabled', o: 'perfEnabled', k: 'skipAdsEnabled',
+    m: 'blockEnabled',
   };
   const HOTKEY_STORE = {
     cleanEnabled: 'cleanMode', guardEnabled: 'guardMode',
     perfEnabled: 'perfMode', skipAdsEnabled: 'skipAdsMode',
+    blockEnabled: 'blockMode',
   };
 
   function applyMode() {
@@ -1517,6 +1952,143 @@
     btn.title = `${title}：${on ? '已开启' : '已关闭'}（点击切换）`;
   }
 
+  /** 显示"已跳过"撤销条，让用户能把误判的视频加回白名单 */
+  function showUndo(vid, nickname) {
+    state.undoSkipped = { vid, nickname };
+    const box = state.bar && state.bar.querySelector('.s4tm-undo');
+    if (!box) return;
+    const label = box.querySelector('span');
+    if (label) label.textContent = nickname ? `已跳过 ${nickname}` : '已跳过本条';
+    box.hidden = false;
+    if (state.undoTimer) clearTimeout(state.undoTimer);
+    state.undoTimer = setTimeout(() => {
+      state.undoTimer = 0;
+      box.hidden = true;
+      state.undoSkipped = null;
+    }, CONFIG.undoToastMs);
+    scheduleAvoid(true);
+  }
+
+  /** 把刚跳过的视频加入放行名单，刷新后仍然生效 */
+  function allowSkipped() {
+    const target = state.undoSkipped;
+    if (!target || !target.vid) return;
+    addRule('allowed', target.vid, CONFIG.maxAllowedVideos);
+    state.lastSkippedVid = '';
+    const box = state.bar && state.bar.querySelector('.s4tm-undo');
+    if (box) box.hidden = true;
+    if (state.undoTimer) {
+      clearTimeout(state.undoTimer);
+      state.undoTimer = 0;
+    }
+    state.undoSkipped = null;
+    log('本条已放行', target.vid);
+  }
+
+  /** 面板上的四个动作：标记广告 / 本条放行 / 屏蔽作者 / 加白名单 */
+  function ruleAction(action) {
+    const info = readCardInfo();
+    if (!info || (!info.vid && !info.authorId)) {
+      warn('当前没有可操作的视频');
+      return;
+    }
+    if (action === 'markAd' && info.vid) {
+      addRule('markedAds', info.vid, CONFIG.maxMarkedAds);
+      countAds(1);
+      log('已标记广告', info.vid);
+    } else if (action === 'allow' && info.vid) {
+      addRule('allowed', info.vid, CONFIG.maxAllowedVideos);
+      state.lastSkippedVid = '';
+      log('本条已放行', info.vid);
+    } else if (action === 'blockAuthor' && info.authorId) {
+      addRule('authors', { id: info.authorId, name: info.nickname },
+        CONFIG.maxBlockedAuthors);
+      log('已屏蔽作者', info.authorId);
+    } else if (action === 'whiteAuthor' && info.authorId) {
+      addRule('whitelist', { id: info.authorId, name: info.nickname },
+        CONFIG.maxBlockedAuthors);
+      log('已加白名单', info.authorId);
+    } else {
+      return;
+    }
+    refreshAdCards();
+    renderRuleList();
+    updateBar();
+  }
+
+  /**
+   * 渲染规则清单。entry.value 是删除时用的原始标识，entry.label 才是显示文本；
+   * 行按需创建并复用，只建到实际条数，不再留看不见却点不动的空行。
+   */
+  function renderRuleList() {
+    const bar = state.bar;
+    const list = bar && bar.querySelector('.s4tm-rules__list');
+    if (!list) return;
+    const entries = [];
+    for (const [group, label] of [
+      ['keywords', '关键词'], ['authors', '屏蔽作者'], ['whitelist', '白名单'],
+      ['markedAds', '标记广告'], ['allowed', '本条放行'],
+    ]) {
+      for (const item of state.rules[group]) {
+        entries.push({
+          group,
+          value: typeof item === 'string' ? item : (item.id || item.text),
+          label: `${label} · ${typeof item === 'string' ? item : (item.name || item.text)}`,
+        });
+      }
+    }
+
+    const count = bar.querySelector('[data-s4tm="rule-count"]');
+    if (count) count.textContent = entries.length ? `${entries.length} 条` : '';
+
+    // 先移除空提示，避免新建的行被挤到它后面
+    const empty = list.querySelector('.s4tm-rules__empty');
+    if (empty) empty.remove();
+
+    const capacity = Number(list.getAttribute('data-s4tm-row-cap') || 12);
+    let rows = list.querySelectorAll('.s4tm-rules__item');
+    while (entries.length > rows.length && rows.length < capacity) {
+      const row = document.createElement('div');
+      row.className = 's4tm-rules__item';
+      const text = document.createElement('span');
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '×';
+      del.title = '删除这条规则';
+      row.append(text, del);
+      list.appendChild(row);
+      rows = list.querySelectorAll('.s4tm-rules__item');
+    }
+    const limit = Math.min(entries.length, rows.length);
+    for (let i = 0; i < limit; i += 1) {
+      rows[i].hidden = false;
+      rows[i].setAttribute('data-group', entries[i].group);
+      rows[i].setAttribute('data-value', entries[i].value);
+      const text = rows[i].querySelector('span');
+      if (text) text.textContent = entries[i].label;
+    }
+    for (let i = limit; i < rows.length; i += 1) rows[i].hidden = true;
+
+    if (!entries.length) {
+      const node = document.createElement('div');
+      node.className = 's4tm-rules__empty';
+      node.textContent = '暂无规则，用下方关键词添加';
+      list.appendChild(node);
+    }
+  }
+
+  function toggleRulePanel() {
+    const panel = state.bar && state.bar.querySelector('.s4tm-rules');
+    if (!panel) return;
+    state.rulePanelOpen = !state.rulePanelOpen;
+    panel.hidden = !state.rulePanelOpen;
+    if (state.rulePanelOpen) renderRuleList();
+    // 面板高度变了，展开与收起都要重算避让
+    scheduleAvoid(true);
+    // 文字、aria-pressed、title 统一由 updateBar 维护，避免两处写法打架
+    updateBar();
+  }
+
   function updateBar() {
     if (!state.bar) return;
     state.bar.setAttribute('data-s4tm-count',
@@ -1524,6 +2096,7 @@
     const label = state.bar.querySelector('.s4tm-label');
     const blockedStat = state.bar.querySelector('.s4tm-stat__blocked');
     const adsStat = state.bar.querySelector('.s4tm-stat__ads');
+    const filteredStat = state.bar.querySelector('.s4tm-stat__filtered');
     const names = { video: '视频', live: '直播', browse: '浏览' };
 
     if (label) label.textContent = `抖音 · ${names[state.mode] || '浏览'}`;
@@ -1532,10 +2105,23 @@
         ? `拦 ${state.blockedCount}` : '拦截已暂停';
     }
     if (adsStat) adsStat.textContent = state.guardEnabled ? `去广告 ${state.adCount}` : '';
+    if (filteredStat) {
+      filteredStat.textContent = state.blockEnabled || state.ruleIndex.markedAds.size
+        ? `筛 ${state.filteredCount}` : '';
+    }
 
     setToggle(state.buttons.clean, state.cleanEnabled, '清爽', '原版', '清爽模式 Alt + H');
     setToggle(state.buttons.perf, state.perfEnabled, '省性能', '性能关', '预加载与特效限制 Alt + O');
     setToggle(state.buttons.skip, state.skipAdsEnabled, '跳广告', '跳广告关', '自动跳过广告 Alt + K');
+    setToggle(state.buttons.block, state.blockEnabled, '屏蔽', '屏蔽关',
+      '自定义关键词与作者屏蔽 Alt + M');
+
+    const rules = state.buttons.rules;
+    if (rules) {
+      rules.textContent = state.rulePanelOpen ? '规则收起' : '规则设置';
+      rules.setAttribute('aria-pressed', String(state.rulePanelOpen));
+      rules.title = state.rulePanelOpen ? '收起规则面板' : '展开关键词 / 作者规则面板';
+    }
 
     const guard = state.buttons.guard;
     if (guard) {
@@ -1562,6 +2148,10 @@
     state[stateKey] = !state[stateKey];
     store.set(HOTKEY_STORE[stateKey], state[stateKey]);
     if (stateKey === 'cleanEnabled') applyMode();
+    if (stateKey === 'blockEnabled') {
+      refreshAdCards();
+      scheduleIdle(() => runInspection([document.body || document.documentElement]));
+    }
     updateBar();
     log('开关变更', stateKey, state[stateKey]);
   }
@@ -1819,12 +2409,17 @@
     const adsStat = document.createElement('span');
     adsStat.className = 's4tm-stat__ads';
     adsStat.setAttribute('data-s4tm', 'stat-ads');
-    stat.append(blockedStat, adsStat);
+    const filteredStat = document.createElement('span');
+    filteredStat.className = 's4tm-stat__filtered';
+    filteredStat.setAttribute('data-s4tm', 'stat-filtered');
+    stat.append(blockedStat, adsStat, filteredStat);
 
     const clean = makeToggle('clean', () => toggleFlag('cleanEnabled'));
     const guard = makeToggle('guard', () => toggleFlag('guardEnabled'));
     const perf = makeToggle('perf', () => toggleFlag('perfEnabled'));
     const skip = makeToggle('skip', () => toggleFlag('skipAdsEnabled'));
+    const block = makeToggle('block', () => toggleFlag('blockEnabled'));
+    const rules = makeToggle('rules', toggleRulePanel);
     const collapse = makeToggle('collapse', () => setBarCollapsed(!state.barCollapsed));
     // 两个图标按折叠态切换：圆点显示盾牌，展开态显示收起箭头
     collapse.append(
@@ -1835,10 +2430,23 @@
     const grid = document.createElement('div');
     grid.className = 's4tm-grid';
     grid.setAttribute('data-s4tm', 'grid');
-    grid.append(clean, guard, perf, skip);
+    grid.append(clean, guard, perf, skip, block, rules);
+
+    const undo = document.createElement('div');
+    undo.className = 's4tm-undo';
+    undo.setAttribute('data-s4tm', 'undo');
+    undo.hidden = true;
+    const undoText = document.createElement('span');
+    const undoBtn = document.createElement('button');
+    undoBtn.type = 'button';
+    undoBtn.textContent = '放行';
+    undoBtn.addEventListener('click', allowSkipped);
+    undo.append(undoText, undoBtn);
+
+    const rulesPanel = buildRulesPanel();
 
     head.append(mark, label, collapse);
-    bar.append(head, stat, grid);
+    bar.append(head, stat, grid, undo, rulesPanel);
     (document.body || document.documentElement).appendChild(bar);
 
     const saved = store.get('barPos', null);
@@ -1852,10 +2460,109 @@
     if (state.barCollapsed) bar.setAttribute('data-s4tm-collapsed', '1');
 
     state.bar = bar;
-    state.buttons = { clean, guard, perf, skip, collapse };
+    state.buttons = { clean, guard, perf, skip, block, rules, collapse };
     enableBarDrag(bar);
     updateBar();
     scheduleAvoid(true);
+  }
+
+  /**
+   * 构建规则面板：动作区 + 规则清单 + 关键词输入三个分区。
+   * 清单行完全按需创建，不再预建空行（空行的 × 看得见却点不动）。
+   * @returns {HTMLElement}
+   */
+  function buildRulesPanel() {
+    const panel = document.createElement('div');
+    panel.className = 's4tm-rules';
+    panel.setAttribute('data-s4tm', 'rules');
+    panel.hidden = true;
+
+    const actionSection = document.createElement('div');
+    actionSection.className = 's4tm-section';
+    const actionTitle = document.createElement('div');
+    actionTitle.className = 's4tm-section__title';
+    actionTitle.textContent = '当前视频';
+    const actionHint = document.createElement('em');
+    actionHint.textContent = '先刷到要操作的那一条';
+    actionTitle.appendChild(actionHint);
+    const actions = document.createElement('div');
+    actions.className = 's4tm-rules__row';
+    actions.setAttribute('data-s4tm', 'rule-actions');
+    for (const [action, text] of [
+      ['markAd', '标记广告'], ['allow', '本条放行'],
+      ['blockAuthor', '屏蔽作者'], ['whiteAuthor', '加白名单'],
+    ]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 's4tm-toggle';
+      btn.textContent = text;
+      btn.setAttribute('data-action', action);
+      actions.appendChild(btn);
+    }
+    actionSection.append(actionTitle, actions);
+    panel.appendChild(actionSection);
+
+    const listSection = document.createElement('div');
+    listSection.className = 's4tm-section';
+    const listTitle = document.createElement('div');
+    listTitle.className = 's4tm-section__title';
+    listTitle.textContent = '已保存规则';
+    const listCount = document.createElement('em');
+    listCount.setAttribute('data-s4tm', 'rule-count');
+    listTitle.appendChild(listCount);
+    const list = document.createElement('div');
+    list.className = 's4tm-rules__list';
+    list.setAttribute('data-s4tm', 'rule-list');
+    const rowTotal = CONFIG.maxKeywords + CONFIG.maxBlockedAuthors * 2
+      + CONFIG.maxMarkedAds + CONFIG.maxAllowedVideos;
+    list.setAttribute('data-s4tm-row-cap', String(rowTotal));
+    listSection.append(listTitle, list);
+    panel.appendChild(listSection);
+
+    const add = document.createElement('div');
+    add.className = 's4tm-rules__add';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '关键词（作者 / 文案 / 话题）';
+    input.setAttribute('data-s4tm', 'rule-input');
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 's4tm-toggle';
+    addBtn.textContent = '添加';
+    addBtn.setAttribute('data-s4tm', 'rule-add');
+    add.append(input, addBtn);
+    panel.appendChild(add);
+
+    // 事件委托：面板整体只挂两个监听器，行节点复用不累积
+    actions.addEventListener('click', (event) => {
+      const btn = event.target.closest('button[data-action]');
+      if (btn) ruleAction(btn.getAttribute('data-action'));
+    });
+    list.addEventListener('click', (event) => {
+      const btn = event.target.closest('button');
+      if (!btn) return;
+      const row = btn.closest('.s4tm-rules__item');
+      if (!row) return;
+      removeRule(row.getAttribute('data-group'), row.getAttribute('data-value'));
+      renderRuleList();
+      updateBar();
+    });
+    const submitKeyword = () => {
+      const text = (input.value || '').trim().slice(0, 40);
+      if (!text) return;
+      const scopes = [RULE_SCOPES.NAME, RULE_SCOPES.DESC, RULE_SCOPES.TAG];
+      if (addRule('keywords', { text, scopes }, CONFIG.maxKeywords)) {
+        input.value = '';
+        renderRuleList();
+        updateBar();
+      }
+    };
+    addBtn.addEventListener('click', submitKeyword);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') submitKeyword();
+    });
+
+    return panel;
   }
 
   function onKeyDown(event) {
@@ -1886,7 +2593,9 @@
       state.guardEnabled = store.get('guardMode', true) !== false;
       state.perfEnabled = store.get('perfMode', true) !== false;
       state.skipAdsEnabled = store.get('skipAdsMode', true) !== false;
+      state.blockEnabled = store.get('blockMode', false) === true;
       state.barCollapsed = store.get('barCollapsed', false) === true;
+      loadRules();
       installGuard();
     } catch (err) {
       warn('网络拦截初始化失败', err);
