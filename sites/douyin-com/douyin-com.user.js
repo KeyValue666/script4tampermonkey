@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 抖音网页版 · 清爽省流
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/douyin-com
-// @version      0.2.2
+// @version      0.2.3
 // @description  刷视频去广告与营销弹窗、看直播只留画面和弹幕，并拦截埋点广告请求与预加载开销
 // @author       KeyValue666
 // @match        https://www.douyin.com/*
@@ -155,6 +155,10 @@
 
   /** 直播首页 / 分类页只做网络拦截，不改界面，避免找不到想看的房间 */
   const LIVE_BROWSE_RE = /^\/(?:categorynew|category|rank|hot|all|follow|index\.html)?(?:\/|$)/;
+
+  /** 直播间入口不止 /live/<房间号>：从关注页点进去是 /follow/live/<房间号>，
+   *  另有 /root/live/ 与 /living/ 形态；SPA 切换不刷新页面，按 URL 判定最稳 */
+  const LIVE_ROOM_PATH_RE = /^\/(?:follow\/|root\/)?live\/\d+|^\/living(?:\/|$)/;
 
   /** 只按精确短文案打标记，视频描述里偶然出现「广告」二字不会误伤 */
   const AD_BADGE_RE = /^(?:广告|推广|赞助|商业推广|了解详情|立即下载|立即购买|去购买|查看详情)$/;
@@ -624,6 +628,22 @@
       display: none !important;
     }
 
+    /* 底部礼物墙（一排送礼图标）：0.1.1 为避免误伤弹幕里的送礼消息，
+       删掉了宽泛的 gift 规则，礼物栏本体从此漏网。这里只认官方埋点属性
+       gifts-container，不用 [data-e2e*="gift"]，gift-setting 与弹幕消息
+       都不受影响；不绑 mode，SPA 路由判定滞后时也照样隐藏。 */
+    html[data-s4tm-clean="1"] [data-e2e="gifts-container"],
+    html[data-s4tm-clean="1"] [data-e2e="gift-container"] {
+      display: none !important;
+    }
+
+    /* 礼物项类名兜底：抖音改掉埋点属性时仍能收起；必须排除弹幕区，
+       否则聊天室里的送礼消息会被连带隐藏（0.1.1 踩过的坑） */
+    html[data-s4tm-clean="1"]
+      [class*="gift_item_gift_bar"]:not([class*="chatroom"]):not([data-e2e*="chat"]) {
+      display: none !important;
+    }
+
     /* 礼物飘屏、跑马灯、动图横幅会持续跑动画与 canvas，直接不渲染 */
     html[data-s4tm-clean="1"] [class*="gift-effect"],
     html[data-s4tm-clean="1"] [class*="GiftEffect"],
@@ -998,10 +1018,12 @@
   function currentMode() {
     const path = location.pathname;
     if (location.hostname === 'live.douyin.com') {
+      // 先认房间路径：/follow/live/<id> 会被下面的浏览页正则误吞
+      if (LIVE_ROOM_PATH_RE.test(path)) return MODE.LIVE;
       return path === '/' || LIVE_BROWSE_RE.test(path) ? MODE.BROWSE : MODE.LIVE;
     }
     if (/^\/live\/?$/.test(path)) return MODE.BROWSE;
-    if (/^\/live\/\d+/.test(path)) return MODE.LIVE;
+    if (LIVE_ROOM_PATH_RE.test(path)) return MODE.LIVE;
     return MODE.VIDEO;
   }
 
