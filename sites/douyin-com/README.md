@@ -5,7 +5,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 脚本文件 | [`douyin-com.user.js`](./douyin-com.user.js) |
-| 当前版本 | `0.2.1` |
+| 当前版本 | `0.2.2` |
 | 适配域名 | `https://www.douyin.com/*`、`https://live.douyin.com/*` |
 | 脚本管理器 | Tampermonkey 5.x / Violentmonkey 2.x |
 | 安装 | [点击安装](https://raw.githubusercontent.com/KeyValue666/script4tampermonkey/main/sites/douyin-com/douyin-com.user.js) |
@@ -67,7 +67,7 @@
 - **广告响应过滤依赖明文 JSON**：目前按 `aweme_list` 数组与 `is_ads` / `is_ad` / `ad_info` 字段判断。抖音若改成加密响应、换字段名或换列表结构，这一步会静默失效，但 DOM 层的广告角标隐藏与请求黑名单仍然有效。
 - **选择器会随改版失效**：`data-e2e` 属性与节点 id 相对稳定，哈希类名不写进脚本；失效时隐藏规则静默跳过，不白屏也不报错。此时点「原版界面」可完整还原，再提 issue 附上页面结构。
 - **自动跳过可能误判**：极端情况下正常视频的描述恰好等于「广告 / 推广」等短文案，会被当作广告卡片跳过。脚本每批复核卡片角标、按视频 id 去重，但挡不住站点改写文案。误跳过后 5 秒内点撤销条的「放行」即可，或在目标视频上用「本条放行」/「加白名单」永久保留；按 `Alt + K` 关掉跳广告也行。
-- **自定义屏蔽的匹配边界**：作者名按全等、文案与话题按子串匹配。关键词只在推荐流明文 JSON 与卡片可见文本里比对，抖音若把文案加密或改用不含 `data-e2e` 的自定义组件，关键词屏蔽会静默失效（白名单 / 标记广告按 ID 匹配不受影响）。作者 ID 取自形如 `/user/` 加作者编号的链接路径，取不到时该条作者规则不生效。
+- **自定义屏蔽的匹配边界**：作者名按全等、文案与话题按子串匹配。关键词只在推荐流明文 JSON 与卡片可见文本里比对，抖音若把文案加密或改用不含 `data-e2e` 的自定义组件，关键词屏蔽会静默失效（白名单 / 标记广告按 ID 匹配不受影响）。作者 ID 取自头像链接或昵称链接的 `/user/` 后一段；抖音若同时改掉 `video-avatar` 与 `feed-video-nickname` 两个 `data-e2e`，屏蔽作者 / 加白名单会失效并在 Console 给出 warn，此时提 issue 附上新的节点结构。
 - **规则有数量上限**：关键词 200、作者黑名单 / 白名单各 500、标记广告 2000、本条放行 200，防止本地存储被写满。到达上限后新规则不再写入，需先在清单里删掉旧的。
 - **自动避让依赖输入控件特征**：识别 `input`、`textarea`、`contenteditable`、`role="textbox"` 与弹幕 / 评论发送按钮。抖音若改用不带这些属性的自定义 Web Component，工具条不会自动上移；此时用「收起」或拖动兜底，并提 issue 附上节点结构。
 - **直播布局不强改**：脚本只移除冗余区块，播放器尺寸交回抖音自己计算，避免站点换成 grid 布局后错位。想铺满视口请用站点自带的全屏 / 剧场模式按钮。
@@ -104,7 +104,7 @@
 | 页面骨架 | `#root`、`#douyin-header`、`#slidelist`、`#douyin-right-container` | 抖音 Web 的稳定 id；只用于隐藏顶部导航，不匹配时无副作用 |
 | 推荐流卡片 | `[data-e2e="feed-item"]`、`[data-e2e="feed-live"]` | 官方埋点属性，2026-11 社区实机核对，比哈希类名稳定 |
 | 当前视频 | `[data-e2e="feed-active-video"]` | 自动跳过广告、读取当前视频 ID / 作者时定位卡片 |
-| 作者链接 | `a[href*="/user/"]` | 作者的稳定 ID 取自链接路径，用于黑名单 / 白名单按 ID 匹配 |
+| 作者链接 | `a[data-e2e="video-avatar"]`、`[data-e2e="feed-video-nickname"] a`、`.account a[href*="/user/"]` | 多候选按顺序取，sec_uid 从 href 的 `/user/` 后一段提取，用于黑名单 / 白名单按 ID 匹配 |
 | 视频描述 | `[data-e2e="video-desc"]`、`[data-e2e="desc"]` | DOM 兜底时提取文案与 `#话题`，失效时数据层过滤仍有效 |
 | 切换下一条 | `[data-e2e="video-switch-next-arrow"]` | 只做切换，不触发点赞 / 关注 / 送礼 |
 | 播放器 | `.xgplayer` 及其内部视频元素 | 语义类名，脚本不改写播放器 DOM |

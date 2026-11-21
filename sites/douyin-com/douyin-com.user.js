@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 抖音网页版 · 清爽省流
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/douyin-com
-// @version      0.2.1
+// @version      0.2.2
 // @description  刷视频去广告与营销弹窗、看直播只留画面和弹幕，并拦截埋点广告请求与预加载开销
 // @author       KeyValue666
 // @match        https://www.douyin.com/*
@@ -169,6 +169,22 @@
     'script[src]', 'iframe[src]', 'link[href]', 'img[src]', 'source[src]',
     'video', '[data-e2e]', '[role="dialog"]', 'a[href]',
   ].join(',');
+
+  /*
+   * 作者链接不总在 active video 的子树里。2026-11 对照多个活跃油猴脚本核对：
+   * 头像链接 a[data-e2e="video-avatar"] 最稳，昵称链接次之，.account 兜底。
+   * 按顺序取第一个命中的，避免整卡扫 a[href*="/user/"] 抓到别的视频。
+   */
+  const AUTHOR_LINK_SELECTORS = [
+    'a[data-e2e="video-avatar"][href]',
+    '[data-e2e="feed-video-nickname"] a[href]',
+    '.account a[href*="/user/"]',
+    'a[href*="/user/"]',
+  ];
+  const AUTHOR_NAME_SELECTORS = [
+    '[data-e2e="feed-video-nickname"]',
+    '[data-e2e="video-nickname"]',
+  ];
 
   /** 评论框、弹幕发言框与发送按钮：工具条必须给它们让位 */
   const INTERACTIVE_SELECTOR = [
@@ -1144,10 +1160,31 @@
   function readCardInfo(card) {
     const active = card || document.querySelector('[data-e2e="feed-active-video"]');
     if (!active) return null;
-    const owner = active.closest('[data-e2e="feed-item"]') || active;
-    const author = owner.querySelector('a[href*="/user/"]');
+    // 作者链接在 feed-item 的头部，未必在 active 节点子树里；但绝不能跨出
+    // feed-item 往上找，否则会抓到相邻视频的作者，屏蔽错人。
+    const feedItem = active.closest('[data-e2e="feed-item"]');
+    const owner = feedItem || active;
+    let author = null;
+    for (const selector of AUTHOR_LINK_SELECTORS) {
+      const found = owner.querySelector(selector);
+      if (found) {
+        author = found;
+        break;
+      }
+    }
     const href = author ? (author.getAttribute('href') || '') : '';
     const matched = href.match(/\/user\/([^/?#]+)/);
+
+    let nickname = '';
+    for (const selector of AUTHOR_NAME_SELECTORS) {
+      const node = owner.querySelector(selector);
+      if (node && (node.textContent || '').trim()) {
+        nickname = (node.textContent || '').trim();
+        break;
+      }
+    }
+    if (!nickname && author) nickname = (author.textContent || '').trim();
+
     const descEl = owner.querySelector('[data-e2e="video-desc"], [data-e2e="desc"]');
     const desc = descEl ? (descEl.textContent || '').trim() : '';
     const tags = [];
@@ -1156,7 +1193,7 @@
       vid: active.getAttribute('data-e2e-vid')
         || owner.getAttribute('data-e2e-vid') || '',
       authorId: matched ? matched[1] : '',
-      nickname: author ? (author.textContent || '').trim() : '',
+      nickname,
       desc,
       tags,
     };
@@ -1657,7 +1694,8 @@
    * @param {Element} card
    */
   function applyUserRulesToCard(card) {
-    if (!card.getAttribute('data-e2e-vid') && !card.querySelector('a[href*="/user/"]')) return;
+    if (!card.getAttribute('data-e2e-vid')
+      && !AUTHOR_LINK_SELECTORS.some((selector) => card.querySelector(selector))) return;
     const verdict = matchUserRules(readCardInfo(card));
     if (verdict === 'block') card.setAttribute(BLOCK_ATTR, '1');
     else if (verdict === 'allow') card.removeAttribute(BLOCK_ATTR);
@@ -2000,14 +2038,16 @@
       addRule('allowed', info.vid, CONFIG.maxAllowedVideos);
       state.lastSkippedVid = '';
       log('本条已放行', info.vid);
-    } else if (action === 'blockAuthor' && info.authorId) {
-      addRule('authors', { id: info.authorId, name: info.nickname },
+    } else if (action === 'blockAuthor' || action === 'whiteAuthor') {
+      if (!info.authorId) {
+        // 取不到作者 ID 时给出明确原因，别让用户点了没反应
+        warn('没读到当前视频的作者，请刷到视频卡片加载完成后再试');
+        return;
+      }
+      const group = action === 'blockAuthor' ? 'authors' : 'whitelist';
+      addRule(group, { id: info.authorId, name: info.nickname },
         CONFIG.maxBlockedAuthors);
-      log('已屏蔽作者', info.authorId);
-    } else if (action === 'whiteAuthor' && info.authorId) {
-      addRule('whitelist', { id: info.authorId, name: info.nickname },
-        CONFIG.maxBlockedAuthors);
-      log('已加白名单', info.authorId);
+      log(action === 'blockAuthor' ? '已屏蔽作者' : '已加白名单', info.authorId);
     } else {
       return;
     }
