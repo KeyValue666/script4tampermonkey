@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.4.1
-// @description  B 站首页 2×5 推荐、Alt+R 旋转、音频提取、去广告与追踪、跳过片头片尾、推荐/评论过滤、动态页宽屏
+// @version      2.5.0
+// @description  B 站首页 2×5 推荐、点击旋转视频、音频提取、去广告与追踪、跳过片头片尾、推荐/评论过滤、动态页宽屏
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
 // @match        https://t.bilibili.com/*
@@ -42,7 +42,6 @@
     panelVisible: true,
     left: null,
     top: 96,
-    rotateEnabled: true,
     homeGridEnabled: true,
     // 面板折叠分区：记录每个功能分区的展开状态（缺省 = 展开）
     openSections: null,
@@ -165,14 +164,6 @@
     return !!element && element.getClientRects().length > 0;
   }
 
-  function isEditableElement(element) {
-    // 键盘事件的 target 不一定是元素（例如直接派发到 document），必须防御
-    if (!(element instanceof Element)) return false;
-    return !!element.closest(
-      'input, textarea, select, [contenteditable="true"]',
-    );
-  }
-
   function isHomePage() {
     return location.hostname === 'www.bilibili.com'
       && (location.pathname === '/' || location.pathname === '/index.html');
@@ -224,8 +215,6 @@
   }
 
   function rotateVideo() {
-    if (!settings.rotateEnabled) return;
-
     releaseDetachedVideo();
     const video = getCurrentVideo();
     if (!video) {
@@ -256,25 +245,8 @@
     video.style.transformOrigin = 'center center';
     video.style.transform = CONFIG.rotateTransform;
 
-    log('视频已旋转，再按一次 Alt+R 恢复');
+    log('视频已旋转，再点一次「旋转视频」恢复');
   }
-
-  function onKeyDown(event) {
-    if (
-      event.altKey
-      && event.key.toLowerCase() === 'r'
-      && !event.ctrlKey
-      && !event.metaKey
-      && !event.repeat
-      && !isEditableElement(event.target)
-    ) {
-      event.preventDefault();
-      event.stopPropagation();
-      rotateVideo();
-    }
-  }
-
-  on(document, 'keydown', onKeyDown, true);
 
   /* ---------- 功能二：首页推荐 2 行 × 5 列 ---------- */
 
@@ -1298,6 +1270,35 @@
         overflow-wrap: anywhere;
       }
 
+      #s4tm-rotate {
+        display: block;
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 9px;
+        color: #e6f7fe;
+        background: rgba(0, 174, 236, 0.2);
+        font-size: 13px;
+        transition: background 0.15s ease, transform 0.1s ease;
+      }
+
+      #s4tm-rotate:hover {
+        background: rgba(0, 174, 236, 0.32);
+      }
+
+      #s4tm-rotate:active {
+        transform: scale(0.98);
+      }
+
+      /* 旋转按钮下方的静态说明行：不可点，只读文案 */
+      .s4tm-option--static {
+        cursor: default;
+        pointer-events: none;
+      }
+
+      .s4tm-option--static:hover {
+        background: none;
+      }
+
       #s4tm-footer {
         margin-top: 8px;
         padding-top: 9px;
@@ -1521,13 +1522,13 @@
             </svg>
           </button>
           <div class="s4tm-section-body">
-            <label class="s4tm-option">
-              <input type="checkbox" id="s4tm-rotate">
+            <button class="s4tm-btn" id="s4tm-rotate" type="button">旋转视频</button>
+            <div class="s4tm-option s4tm-option--static">
               <span>
-                视频旋转快捷键
-                <small>Alt + R：旋转 / 恢复视频</small>
+                点击旋转竖屏视频
+                <small>点一次旋转、再点一次恢复，适配被压成竖屏的 PC 端稿件</small>
               </span>
-            </label>
+            </div>
 
             <label class="s4tm-option">
               <input type="checkbox" id="s4tm-grid">
@@ -1656,15 +1657,14 @@
 
     state.panel = panel;
 
-    const rotateToggle = panel.querySelector('#s4tm-rotate');
+    const rotateButton = panel.querySelector('#s4tm-rotate');
     const gridToggle = panel.querySelector('#s4tm-grid');
 
-    rotateToggle.checked = settings.rotateEnabled;
     gridToggle.checked = settings.homeGridEnabled;
 
-    on(rotateToggle, 'change', (event) => {
-      settings.rotateEnabled = event.target.checked;
-      saveSettings();
+    // 旋转按钮：点一次旋转、再点一次恢复，交互比快捷键更直观且跨平台一致
+    on(rotateButton, 'click', () => {
+      rotateVideo();
     });
 
     on(gridToggle, 'change', (event) => {
