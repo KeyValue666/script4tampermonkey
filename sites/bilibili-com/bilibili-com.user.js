@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.6.0
+// @version      2.7.0
 // @description  B 站首页 2×5 推荐、点击旋转视频、音频提取、去广告与追踪、跳过片头片尾、推荐/评论过滤、动态页宽屏
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
@@ -43,8 +43,6 @@
     left: null,
     top: 96,
     homeGridEnabled: true,
-    // 面板折叠分区：记录每个功能分区的展开状态（缺省 = 展开）
-    openSections: null,
     // 自动跳过片头片尾
     skipIntroEnabled: false,
     skipIntroSeconds: 0,
@@ -623,7 +621,10 @@
 
     if (button) {
       button.disabled = isBusy;
-      button.textContent = isBusy ? '提取中…' : '提取音频';
+      // 文案放在内部 label 节点里，直接改子节点避免破坏按钮结构
+      const label = button.querySelector('.s4tm-action-btn__label');
+      if (label) label.textContent = isBusy ? '提取中…' : '提取音频';
+      else button.textContent = isBusy ? '提取中…' : '提取音频';
     }
     if (status && message) status.textContent = message;
   }
@@ -1133,96 +1134,168 @@
       }
 
       #s4tm-body {
-        padding: 4px 14px 14px;
+        padding: 12px 14px 14px;
       }
 
-      /* ---------- 可折叠分区 ---------- */
-      .s4tm-section {
-        border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+      /* ---------- 快速操作按钮 ---------- */
+      .s4tm-actions-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
       }
 
-      .s4tm-section:last-of-type {
-        border-bottom: 0;
-      }
-
-      .s4tm-section-head {
+      .s4tm-action-btn {
+        flex: 1;
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        width: 100%;
+        justify-content: center;
+        min-height: 38px;
         border: 0;
-        padding: 12px 2px;
-        color: #1d1d1f;
-        background: none;
+        border-radius: 10px;
+        padding: 0 10px;
         cursor: pointer;
         font-size: 13px;
         font-weight: 600;
-        letter-spacing: -0.1px;
-        text-align: left;
-        user-select: none;
+        transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease, opacity 0.15s ease;
       }
 
-      .s4tm-section-head:hover .s4tm-section-arrow {
+      .s4tm-action-btn:active {
+        transform: scale(0.97);
+      }
+
+      .s4tm-action-btn:disabled {
+        cursor: wait;
+        opacity: 0.5;
+      }
+
+      .s4tm-action-btn--primary {
+        color: #fff;
+        background: #007aff;
+        box-shadow: 0 2px 8px rgba(0, 122, 255, 0.28);
+      }
+
+      .s4tm-action-btn--primary:hover {
+        background: #1a86ff;
+      }
+
+      .s4tm-action-btn--ghost {
         color: #007aff;
+        background: rgba(0, 122, 255, 0.1);
       }
 
-      .s4tm-section-arrow {
-        flex: none;
-        color: #98989d;
-        transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), color 0.15s ease;
+      .s4tm-action-btn--ghost:hover {
+        background: rgba(0, 122, 255, 0.16);
       }
 
-      .s4tm-section[data-open] .s4tm-section-arrow {
-        transform: rotate(180deg);
+      .s4tm-action-btn__label {
+        white-space: nowrap;
       }
 
-      .s4tm-section-body {
-        display: none;
-        padding: 0 2px 12px;
+      /* ---------- 分组 ---------- */
+      .s4tm-group {
+        margin-top: 14px;
       }
 
-      .s4tm-section[data-open] .s4tm-section-body {
-        display: block;
+      .s4tm-group:first-of-type {
+        margin-top: 0;
       }
 
-      .s4tm-option {
-        display: flex;
-        align-items: flex-start;
-        gap: 9px;
-        margin: 0;
-        padding: 7px 8px;
-        border-radius: 8px;
-        cursor: pointer;
-        transition: background 0.15s ease;
-      }
-
-      .s4tm-option:hover {
-        background: rgba(0, 0, 0, 0.04);
-      }
-
-      .s4tm-option input {
-        flex: none;
-        width: 16px;
-        height: 16px;
-        margin-top: 2px;
-        accent-color: #007aff;
-        cursor: pointer;
-      }
-
-      .s4tm-option small {
-        display: block;
-        margin-top: 2px;
+      .s4tm-group-title {
+        margin: 0 0 4px;
+        padding: 0 2px;
         color: #6e6e73;
         font-size: 11px;
-        font-weight: 400;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+      }
+
+      /* ---------- 开关行（macOS 风格 toggle） ---------- */
+      .s4tm-switch-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 2px;
+        cursor: pointer;
+      }
+
+      .s4tm-switch-row__text {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .s4tm-switch-row__name {
+        display: block;
+        color: #1d1d1f;
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 1.4;
+      }
+
+      .s4tm-switch-row__desc {
+        display: block;
+        margin-top: 1px;
+        color: #6e6e73;
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      /* 隐藏原生 checkbox，用 track 圆钮呈现 */
+      .s4tm-toggle {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+        opacity: 0;
+      }
+
+      .s4tm-toggle-track {
+        flex: none;
+        position: relative;
+        width: 40px;
+        height: 24px;
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.18);
+        transition: background 0.2s ease;
+      }
+
+      .s4tm-toggle-track::after {
+        content: '';
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.24);
+        transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      .s4tm-toggle:checked + .s4tm-toggle-track {
+        background: #34c759;
+      }
+
+      .s4tm-toggle:checked + .s4tm-toggle-track::after {
+        transform: translateX(16px);
+      }
+
+      /* ---------- 子设置区 ---------- */
+      .s4tm-sub {
+        padding: 2px 0 4px 2px;
       }
 
       .s4tm-field {
         display: flex;
         align-items: center;
         gap: 8px;
-        margin: 7px 0;
+        margin: 6px 0;
       }
 
       .s4tm-field label {
@@ -1254,71 +1327,16 @@
         box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
       }
 
-      #s4tm-audio {
-        display: block;
-        width: 100%;
-        padding: 8px 10px;
-        border-radius: 8px;
-        color: #fff;
-        background: #007aff;
-        font-size: 13px;
-        font-weight: 600;
-        transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
-      }
-
-      #s4tm-audio:hover {
-        background: #1a86ff;
-      }
-
-      #s4tm-audio:disabled {
-        cursor: wait;
-        opacity: 0.55;
-      }
-
-      #s4tm-audio:active {
-        transform: scale(0.98);
-      }
-
       #s4tm-audio-status {
-        margin-top: 7px;
+        margin: -2px 2px 4px;
         color: #6e6e73;
         font-size: 11px;
         line-height: 1.45;
         overflow-wrap: anywhere;
       }
 
-      #s4tm-rotate {
-        display: block;
-        width: 100%;
-        padding: 8px 10px;
-        border-radius: 8px;
-        color: #fff;
-        background: #007aff;
-        font-size: 13px;
-        font-weight: 600;
-        transition: background 0.15s ease, transform 0.1s ease;
-      }
-
-      #s4tm-rotate:hover {
-        background: #1a86ff;
-      }
-
-      #s4tm-rotate:active {
-        transform: scale(0.98);
-      }
-
-      /* 旋转按钮下方的静态说明行：不可点，只读文案 */
-      .s4tm-option--static {
-        cursor: default;
-        pointer-events: none;
-      }
-
-      .s4tm-option--static:hover {
-        background: none;
-      }
-
       #s4tm-footer {
-        margin-top: 10px;
+        margin-top: 14px;
         padding-top: 10px;
         border-top: 1px solid rgba(0, 0, 0, 0.05);
         color: #98989d;
@@ -1363,7 +1381,9 @@
 
         #s4tm-show-panel,
         .s4tm-btn,
-        .s4tm-option {
+        .s4tm-action-btn,
+        .s4tm-toggle-track,
+        .s4tm-toggle-track::after {
           transition: none;
         }
       }
@@ -1531,141 +1551,107 @@
         </div>
       </div>
       <div id="s4tm-body">
-        <section class="s4tm-section" data-section="basic" data-open>
-          <button class="s4tm-section-head" type="button" aria-expanded="true">
-            <span>功能设置</span>
-            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
-              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
-                stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
+
+        <!-- 快速操作：旋转 + 音频提取并排 -->
+        <div class="s4tm-actions-row">
+          <button class="s4tm-action-btn s4tm-action-btn--ghost" id="s4tm-rotate" type="button">
+            <span class="s4tm-action-btn__label">旋转视频</span>
           </button>
-          <div class="s4tm-section-body">
-            <button class="s4tm-btn" id="s4tm-rotate" type="button">旋转视频</button>
-            <div class="s4tm-option s4tm-option--static">
-              <span>
-                点击旋转竖屏视频
-                <small>点一次旋转、再点一次恢复，适配被压成竖屏的 PC 端稿件</small>
-              </span>
-            </div>
-
-            <label class="s4tm-option">
-              <input type="checkbox" id="s4tm-grid">
-              <span>
-                首页推荐 2 行 × 5 列
-                <small>隐藏轮播图，推荐视频自动回填为 2 × 5</small>
-              </span>
-            </label>
-          </div>
-        </section>
-
-        <section class="s4tm-section" data-section="audio" data-open>
-          <button class="s4tm-section-head" type="button" aria-expanded="true">
-            <span>音频提取</span>
-            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
-              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
-                stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
+          <button class="s4tm-action-btn s4tm-action-btn--primary" id="s4tm-audio" type="button">
+            <span class="s4tm-action-btn__label">提取音频</span>
           </button>
-          <div class="s4tm-section-body">
-            <button class="s4tm-btn" id="s4tm-audio" type="button">提取音频</button>
-            <div id="s4tm-audio-status">一键导出完整音轨 · m4a / AAC 无损</div>
-          </div>
-        </section>
+        </div>
+        <div id="s4tm-audio-status">一键导出完整音轨 · m4a / AAC 无损</div>
 
-        <section class="s4tm-section" data-section="skip">
-          <button class="s4tm-section-head" type="button" aria-expanded="false">
-            <span>跳过片头片尾</span>
-            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
-              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
-                stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </button>
-          <div class="s4tm-section-body">
-            <label class="s4tm-option">
-              <input type="checkbox" id="s4tm-skip">
-              <span>
-                自动跳过片头片尾
-                <small>播放到片头 / 片尾区间时自动跳转</small>
-              </span>
-            </label>
+        <!-- 首页 -->
+        <div class="s4tm-group">
+          <h3 class="s4tm-group-title">首页</h3>
+          <label class="s4tm-switch-row">
+            <span class="s4tm-switch-row__text">
+              <span class="s4tm-switch-row__name">推荐 2 行 × 5 列</span>
+              <span class="s4tm-switch-row__desc">隐藏轮播图，推荐视频自动回填为 2 × 5</span>
+            </span>
+            <input type="checkbox" id="s4tm-grid" class="s4tm-toggle">
+            <span class="s4tm-toggle-track"></span>
+          </label>
+        </div>
 
+        <!-- 跳过片头片尾 -->
+        <div class="s4tm-group">
+          <h3 class="s4tm-group-title">跳过片头片尾</h3>
+          <label class="s4tm-switch-row">
+            <span class="s4tm-switch-row__text">
+              <span class="s4tm-switch-row__name">自动跳过</span>
+              <span class="s4tm-switch-row__desc">播放到片头 / 片尾区间时自动跳转</span>
+            </span>
+            <input type="checkbox" id="s4tm-skip" class="s4tm-toggle">
+            <span class="s4tm-toggle-track"></span>
+          </label>
+          <div class="s4tm-sub s4tm-sub--skip">
             <div class="s4tm-field">
               <label for="s4tm-skip-intro">片头秒数</label>
               <input type="number" id="s4tm-skip-intro" min="0" step="1" placeholder="0">
             </div>
-
             <div class="s4tm-field">
               <label for="s4tm-skip-outro">片尾秒数</label>
               <input type="number" id="s4tm-skip-outro" min="0" step="1" placeholder="0">
             </div>
           </div>
-        </section>
+        </div>
 
-        <section class="s4tm-section" data-section="cards">
-          <button class="s4tm-section-head" type="button" aria-expanded="false">
-            <span>推荐视频过滤</span>
-            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
-              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
-                stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </button>
-          <div class="s4tm-section-body">
-            <label class="s4tm-option">
-              <input type="checkbox" id="s4tm-filter">
-              <span>
-                启用推荐过滤
-                <small>按 UP 主 / 关键词 / 时长隐藏推荐卡片</small>
-              </span>
-            </label>
-
+        <!-- 推荐视频过滤 -->
+        <div class="s4tm-group">
+          <h3 class="s4tm-group-title">推荐视频过滤</h3>
+          <label class="s4tm-switch-row">
+            <span class="s4tm-switch-row__text">
+              <span class="s4tm-switch-row__name">启用过滤</span>
+              <span class="s4tm-switch-row__desc">按 UP 主 / 关键词 / 时长隐藏推荐卡片</span>
+            </span>
+            <input type="checkbox" id="s4tm-filter" class="s4tm-toggle">
+            <span class="s4tm-toggle-track"></span>
+          </label>
+          <div class="s4tm-sub s4tm-sub--filter">
             <div class="s4tm-field">
               <label for="s4tm-filter-ups">屏蔽 UP 主</label>
               <input type="text" id="s4tm-filter-ups" placeholder="逗号分隔">
             </div>
-
             <div class="s4tm-field">
               <label for="s4tm-filter-keywords">标题屏蔽词</label>
               <input type="text" id="s4tm-filter-keywords" placeholder="逗号分隔">
             </div>
-
             <div class="s4tm-field">
               <label for="s4tm-filter-min">最短时长（秒）</label>
               <input type="number" id="s4tm-filter-min" min="0" step="1" placeholder="0">
             </div>
           </div>
-        </section>
+        </div>
 
-        <section class="s4tm-section" data-section="comments">
-          <button class="s4tm-section-head" type="button" aria-expanded="false">
-            <span>评论区净化</span>
-            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
-              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
-                stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </button>
-          <div class="s4tm-section-body">
-            <label class="s4tm-option">
-              <input type="checkbox" id="s4tm-filter-comment">
-              <span>
-                启用评论过滤
-                <small>按用户名关键词隐藏评论</small>
+        <!-- 评论区净化 -->
+        <div class="s4tm-group">
+          <h3 class="s4tm-group-title">评论区净化</h3>
+          <label class="s4tm-switch-row">
+            <span class="s4tm-switch-row__text">
+              <span class="s4tm-switch-row__name">启用过滤</span>
+              <span class="s4tm-switch-row__desc">按用户名关键词隐藏评论</span>
+            </span>
+            <input type="checkbox" id="s4tm-filter-comment" class="s4tm-toggle">
+            <span class="s4tm-toggle-track"></span>
+          </label>
+          <div class="s4tm-sub s4tm-sub--comment">
+            <label class="s4tm-switch-row">
+              <span class="s4tm-switch-row__text">
+                <span class="s4tm-switch-row__name">隐藏低等级评论</span>
+                <span class="s4tm-switch-row__desc">隐藏 2 级及以下用户的评论</span>
               </span>
+              <input type="checkbox" id="s4tm-low-level" class="s4tm-toggle">
+              <span class="s4tm-toggle-track"></span>
             </label>
-
-            <label class="s4tm-option">
-              <input type="checkbox" id="s4tm-low-level">
-              <span>
-                隐藏低等级评论
-                <small>隐藏 2 级及以下用户的评论</small>
-              </span>
-            </label>
-
             <div class="s4tm-field">
               <label for="s4tm-comment-keywords">评论屏蔽词</label>
               <input type="text" id="s4tm-comment-keywords" placeholder="逗号分隔">
             </div>
           </div>
-        </section>
+        </div>
 
         <div id="s4tm-footer">配置自动保存 · 仅作用于 B 站</div>
       </div>
@@ -1716,6 +1702,7 @@
     on(skipToggle, 'change', (event) => {
       settings.skipIntroEnabled = event.target.checked;
       saveSettings();
+      syncSubVisibility();
     });
 
     on(skipIntro, 'input', () => {
@@ -1747,6 +1734,7 @@
       } else {
         resetCardFilter();
       }
+      syncSubVisibility();
     });
 
     on(filterUps, 'input', () => {
@@ -1787,6 +1775,7 @@
       } else {
         resetCommentFilter();
       }
+      syncSubVisibility();
     });
 
     on(lowLevelToggle, 'change', (event) => {
@@ -1803,34 +1792,13 @@
       applyCommentFilter(document);
     });
 
-    // ---- 折叠分区 ----
-    const DEFAULT_OPEN = { basic: true, audio: true, skip: false, cards: false, comments: false };
-    const openSections = { ...DEFAULT_OPEN, ...(settings.openSections || {}) };
-
-    const applySectionState = (section) => {
-      const key = section.dataset.section;
-      const open = openSections[key];
-      if (open) {
-        section.setAttribute('data-open', '');
-        section.querySelector('.s4tm-section-head').setAttribute('aria-expanded', 'true');
-      } else {
-        section.removeAttribute('data-open');
-        section.querySelector('.s4tm-section-head').setAttribute('aria-expanded', 'false');
-      }
+    // ---- 子设置区显隐：开关关闭时收起对应参数输入，减少视觉噪音 ----
+    const syncSubVisibility = () => {
+      panel.querySelector('.s4tm-sub--skip').style.display = settings.skipIntroEnabled ? '' : 'none';
+      panel.querySelector('.s4tm-sub--filter').style.display = settings.filterCardsEnabled ? '' : 'none';
+      panel.querySelector('.s4tm-sub--comment').style.display = settings.filterCommentsEnabled ? '' : 'none';
     };
-
-    for (const section of panel.querySelectorAll('.s4tm-section')) {
-      applySectionState(section);
-      on(section.querySelector('.s4tm-section-head'), 'click', () => {
-        const key = section.dataset.section;
-        openSections[key] = !openSections[key];
-        applySectionState(section);
-        settings.openSections = openSections;
-        saveSettings();
-        // 展开/折叠会改变面板高度，重新钳制位置避免顶出视口
-        placePanel();
-      });
-    }
+    syncSubVisibility();
 
     makeDraggable(panel, panel.querySelector('#s4tm-header'));
 
