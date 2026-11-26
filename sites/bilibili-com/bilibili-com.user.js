@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.5.0
+// @version      2.6.0
 // @description  B 站首页 2×5 推荐、点击旋转视频、音频提取、去广告与追踪、跳过片头片尾、推荐/评论过滤、动态页宽屏
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
@@ -1025,30 +1025,31 @@
     const style = document.createElement('style');
     style.id = 's4tm-styles';
     style.textContent = `
-      /* ---------- 个性化面板 ---------- */
+      /* ---------- 个性化面板（浅色 macOS 毛玻璃） ---------- */
       #s4tm-panel {
         position: fixed;
         z-index: 2147483647;
-        width: 272px;
+        width: 288px;
         max-width: calc(100vw - 16px);
-        color: #e8e8e8;
-        background: linear-gradient(180deg, rgba(36, 39, 44, 0.97), rgba(27, 29, 33, 0.97));
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 14px;
+        color: #1d1d1f;
+        background: rgba(255, 255, 255, 0.78);
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 16px;
         box-shadow:
-          0 12px 40px rgba(0, 0, 0, 0.32),
-          0 2px 8px rgba(0, 0, 0, 0.18);
-        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          0 18px 50px rgba(0, 0, 0, 0.18),
+          0 2px 10px rgba(0, 0, 0, 0.06);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
         overflow: hidden;
-        backdrop-filter: blur(14px);
-        animation: s4tm-panel-in 0.24s ease-out;
+        backdrop-filter: blur(24px) saturate(180%);
+        -webkit-backdrop-filter: blur(24px) saturate(180%);
+        animation: s4tm-panel-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
       }
 
       /* display 切换会重放此动画，正好充当打开面板的过渡 */
       @keyframes s4tm-panel-in {
         from {
           opacity: 0;
-          transform: translateY(-6px) scale(0.98);
+          transform: translateY(-8px) scale(0.98);
         }
 
         to {
@@ -1066,8 +1067,8 @@
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        padding: 11px 12px;
-        background: linear-gradient(90deg, rgba(0, 174, 236, 0.16), rgba(0, 174, 236, 0.04));
+        padding: 13px 14px 11px;
+        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
         cursor: move;
         user-select: none;
         touch-action: none;
@@ -1076,20 +1077,22 @@
       #s4tm-title {
         display: flex;
         align-items: center;
-        gap: 7px;
+        gap: 8px;
         font-weight: 600;
-        letter-spacing: 0.2px;
+        font-size: 14px;
+        letter-spacing: -0.2px;
+        color: #1d1d1f;
         white-space: nowrap;
       }
 
       #s4tm-title::before {
         content: '';
         flex: none;
-        width: 8px;
-        height: 8px;
+        width: 9px;
+        height: 9px;
         border-radius: 50%;
-        background: #00aeec;
-        box-shadow: 0 0 6px rgba(0, 174, 236, 0.8);
+        background: #007aff;
+        box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
       }
 
       .s4tm-actions {
@@ -1098,33 +1101,44 @@
       }
 
       .s4tm-btn {
-        min-width: 24px;
+        min-width: 26px;
+        height: 26px;
         border: 0;
         border-radius: 7px;
-        padding: 4px 8px;
-        color: inherit;
-        background: rgba(255, 255, 255, 0.1);
+        padding: 0 8px;
+        color: #1d1d1f;
+        background: rgba(0, 0, 0, 0.05);
         cursor: pointer;
-        font-size: 13px;
+        font-size: 14px;
         line-height: 1;
         transition: background 0.15s ease, transform 0.1s ease;
       }
 
       .s4tm-btn:hover {
-        background: rgba(255, 255, 255, 0.22);
+        background: rgba(0, 0, 0, 0.1);
       }
 
       .s4tm-btn:active {
-        transform: scale(0.9);
+        transform: scale(0.92);
+      }
+
+      #s4tm-hide {
+        font-size: 17px;
+        line-height: 1;
+        color: #6e6e73;
+      }
+
+      #s4tm-hide:hover {
+        color: #1d1d1f;
       }
 
       #s4tm-body {
-        padding: 8px 12px 12px;
+        padding: 4px 14px 14px;
       }
 
       /* ---------- 可折叠分区 ---------- */
       .s4tm-section {
-        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.05);
       }
 
       .s4tm-section:last-of-type {
@@ -1138,29 +1152,25 @@
         gap: 8px;
         width: 100%;
         border: 0;
-        padding: 10px 2px;
-        color: #c8ced8;
+        padding: 12px 2px;
+        color: #1d1d1f;
         background: none;
         cursor: pointer;
         font-size: 13px;
         font-weight: 600;
-        letter-spacing: 0.3px;
+        letter-spacing: -0.1px;
         text-align: left;
         user-select: none;
       }
 
-      .s4tm-section-head:hover {
-        color: #fff;
-      }
-
       .s4tm-section-head:hover .s4tm-section-arrow {
-        color: #00aeec;
+        color: #007aff;
       }
 
       .s4tm-section-arrow {
         flex: none;
-        color: #7c8490;
-        transition: transform 0.2s ease, color 0.15s ease;
+        color: #98989d;
+        transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), color 0.15s ease;
       }
 
       .s4tm-section[data-open] .s4tm-section-arrow {
@@ -1169,7 +1179,7 @@
 
       .s4tm-section-body {
         display: none;
-        padding: 2px 2px 12px;
+        padding: 0 2px 12px;
       }
 
       .s4tm-section[data-open] .s4tm-section-body {
@@ -1182,29 +1192,30 @@
         gap: 9px;
         margin: 0;
         padding: 7px 8px;
-        border-radius: 9px;
+        border-radius: 8px;
         cursor: pointer;
         transition: background 0.15s ease;
       }
 
       .s4tm-option:hover {
-        background: rgba(255, 255, 255, 0.06);
+        background: rgba(0, 0, 0, 0.04);
       }
 
       .s4tm-option input {
         flex: none;
-        width: 15px;
-        height: 15px;
-        margin-top: 4px;
-        accent-color: #00aeec;
+        width: 16px;
+        height: 16px;
+        margin-top: 2px;
+        accent-color: #007aff;
         cursor: pointer;
       }
 
       .s4tm-option small {
         display: block;
         margin-top: 2px;
-        color: #aeb6c2;
+        color: #6e6e73;
         font-size: 11px;
+        font-weight: 400;
       }
 
       .s4tm-field {
@@ -1216,7 +1227,7 @@
 
       .s4tm-field label {
         flex: none;
-        color: #aeb6c2;
+        color: #6e6e73;
         font-size: 12px;
         white-space: nowrap;
       }
@@ -1224,38 +1235,44 @@
       .s4tm-field input {
         flex: 1;
         min-width: 0;
-        border: 1px solid rgba(255, 255, 255, 0.14);
-        border-radius: 7px;
-        padding: 5px 8px;
-        color: #e8e8e8;
-        background: rgba(255, 255, 255, 0.08);
-        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        border-radius: 8px;
+        padding: 5px 9px;
+        color: #1d1d1f;
+        background: rgba(255, 255, 255, 0.6);
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      }
+
+      .s4tm-field input::placeholder {
+        color: #98989d;
       }
 
       .s4tm-field input:focus {
         outline: none;
-        border-color: rgba(0, 174, 236, 0.6);
-        background: rgba(0, 174, 236, 0.1);
+        border-color: rgba(0, 122, 255, 0.55);
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
       }
 
       #s4tm-audio {
         display: block;
         width: 100%;
         padding: 8px 10px;
-        border-radius: 9px;
-        color: #e6f7fe;
-        background: rgba(0, 174, 236, 0.2);
+        border-radius: 8px;
+        color: #fff;
+        background: #007aff;
         font-size: 13px;
-        transition: background 0.15s ease, transform 0.1s ease;
+        font-weight: 600;
+        transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
       }
 
       #s4tm-audio:hover {
-        background: rgba(0, 174, 236, 0.32);
+        background: #1a86ff;
       }
 
       #s4tm-audio:disabled {
         cursor: wait;
-        opacity: 0.7;
+        opacity: 0.55;
       }
 
       #s4tm-audio:active {
@@ -1264,7 +1281,7 @@
 
       #s4tm-audio-status {
         margin-top: 7px;
-        color: #aeb6c2;
+        color: #6e6e73;
         font-size: 11px;
         line-height: 1.45;
         overflow-wrap: anywhere;
@@ -1274,15 +1291,16 @@
         display: block;
         width: 100%;
         padding: 8px 10px;
-        border-radius: 9px;
-        color: #e6f7fe;
-        background: rgba(0, 174, 236, 0.2);
+        border-radius: 8px;
+        color: #fff;
+        background: #007aff;
         font-size: 13px;
+        font-weight: 600;
         transition: background 0.15s ease, transform 0.1s ease;
       }
 
       #s4tm-rotate:hover {
-        background: rgba(0, 174, 236, 0.32);
+        background: #1a86ff;
       }
 
       #s4tm-rotate:active {
@@ -1300,10 +1318,10 @@
       }
 
       #s4tm-footer {
-        margin-top: 8px;
-        padding-top: 9px;
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
-        color: #aeb6c2;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(0, 0, 0, 0.05);
+        color: #98989d;
         font-size: 11px;
       }
 
@@ -1321,16 +1339,16 @@
         border-radius: 50%;
         padding: 0;
         color: #fff;
-        background: linear-gradient(135deg, #00aeec, #0093d4);
-        box-shadow: 0 4px 16px rgba(0, 174, 236, 0.35);
+        background: #007aff;
+        box-shadow: 0 6px 20px rgba(0, 122, 255, 0.35);
         cursor: pointer;
         transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
       }
 
       #s4tm-show-panel:hover {
-        background: linear-gradient(135deg, #01b8f5, #009ddf);
+        background: #1a86ff;
         transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(0, 174, 236, 0.45);
+        box-shadow: 0 8px 24px rgba(0, 122, 255, 0.42);
       }
 
       #s4tm-show-panel:active {
@@ -1361,7 +1379,7 @@
 
       @media (max-width: 520px) {
         #s4tm-panel {
-          width: 236px;
+          width: 252px;
         }
       }
     `;
@@ -1388,7 +1406,7 @@
   function placePanel() {
     if (!state.panel) return;
 
-    const width = state.panel.offsetWidth || 272;
+    const width = state.panel.offsetWidth || 288;
     const height = state.panel.offsetHeight || 220;
     const maxLeft = Math.max(8, window.innerWidth - width - 8);
     const maxTop = Math.max(8, window.innerHeight - Math.min(height, window.innerHeight - 16) - 8);
