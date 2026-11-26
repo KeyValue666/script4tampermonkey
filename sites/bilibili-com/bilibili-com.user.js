@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.3.0
-// @description  B 站首页 2×5 推荐、Alt+R 旋转视频、一键提取音频、去广告与追踪参数、动态页宽屏
+// @version      2.4.1
+// @description  B 站首页 2×5 推荐、Alt+R 旋转、音频提取、去广告与追踪、跳过片头片尾、推荐/评论过滤、动态页宽屏
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
 // @match        https://t.bilibili.com/*
@@ -44,6 +44,21 @@
     top: 96,
     rotateEnabled: true,
     homeGridEnabled: true,
+    // 面板折叠分区：记录每个功能分区的展开状态（缺省 = 展开）
+    openSections: null,
+    // 自动跳过片头片尾
+    skipIntroEnabled: false,
+    skipIntroSeconds: 0,
+    skipOutroSeconds: 0,
+    // 推荐视频过滤
+    filterCardsEnabled: false,
+    filterKeywords: '',
+    filterUps: '',
+    filterMinDuration: 0,
+    // 评论区净化
+    filterCommentsEnabled: false,
+    filterCommentKeywords: '',
+    hideLowLevelComments: false,
   };
 
   /** 全部标记都带 s4tm 前缀，避免与站点属性冲突 */
@@ -176,6 +191,13 @@
     layoutTimer: 0,
     dragFrame: 0,
     extracting: false,
+    // 跳过片头片尾：记录上一次时间，防止 seek 后反复触发
+    lastSkippedAt: 0,
+    // 评论区过滤观察者
+    commentObserver: null,
+    // 推荐 / 评论过滤的防抖 timer
+    cardFilterTimer: 0,
+    commentFilterTimer: 0,
   };
 
   function getCurrentVideo() {
@@ -764,6 +786,265 @@
     return rules.join('\n');
   }
 
+  /* ---------- 功能六：自动跳过片头片尾 ---------- */
+
+  /*
+   * B 站视频元素由播放器动态创建，video 本身随切集/换 P 被替换，
+   * 所以监听 document 上的 timeupdate（捕获阶段），每次回调都重新
+   * 取当前可见的 video，不长期持有对具体 video 的引用。
+   *
+   * 跳过判定：currentTime 小于片头秒数 → seek 到片头；currentTime 超过
+   * duration - 片尾秒数 → seek 到片尾。用 lastSkippedAt 防抖，避免 seek
+   * 后 timeupdate 又立刻触发造成死循环。
+   */
+
+  function applySkipIntroOutro(video) {
+    if (!video || !Number.isFinite(video.duration)) return;
+    const intro = Number(settings.skipIntroSeconds) || 0;
+    const outro = Number(settings.skipOutroSeconds) || 0;
+    if (!intro && !outro) return;
+
+    const now = video.currentTime;
+    // 1.2 秒防抖：刚 seek 完忽略后续 timeupdate，避免抖动
+    if (Date.now() - state.lastSkippedAt < 1200) return;
+
+    let target = null;
+    if (intro > 0 && now < intro) {
+      target = intro;
+    } else if (outro > 0 && now >= video.duration - outro) {
+      target = video.duration - outro;
+    }
+
+    if (target === null) return;
+
+    state.lastSkippedAt = Date.now();
+    video.currentTime = target;
+    log(`已跳过至 ${target.toFixed(1)} 秒`);
+  }
+
+  function onVideoTimeUpdate(event) {
+    if (!settings.skipIntroEnabled) return;
+    // 只处理真正的 video 元素，忽略冒泡自其它节点的杂项事件
+    const target = event.target;
+    if (target && target.tagName === 'VIDEO') {
+      applySkipIntroOutro(target);
+    }
+  }
+
+  function startSkipWatcher() {
+    on(document, 'timeupdate', onVideoTimeUpdate, true);
+  }
+
+  /* ---------- 功能七：推荐视频过滤 ---------- */
+
+  /*
+   * 按 UP 主、标题关键词、时长过滤首页推荐卡片。B 站首页是 SSR + 客户端
+   * 重绘，卡片会动态挂载，所以用 MutationObserver 观察，命中即隐藏。
+   * 隐藏用 data-s4tm-filtered 标记 + display:none，取消勾选时统一还原。
+   */
+
+  function parseFilterList(raw) {
+    return String(raw || '')
+      .split(/[\n,，、;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function getCardDurationSeconds(card) {
+    // 时长通常在卡片封面右下角的 .bili-video-card__stats__duration 或类似节点
+    const node = card.querySelector(
+      '.bili-video-card__stats__duration, .duration, .bili-video-card__stats--duration',
+    );
+    if (!node) return null;
+    const parts = String(node.textContent || '').trim().split(':').map(Number);
+    if (parts.some((n) => !Number.isFinite(n))) return null;
+    return parts.reduce((acc, n) => acc * 60 + n, 0);
+  }
+
+  function getCardUpName(card) {
+    const node = card.querySelector(
+      '.bili-video-card__info--author, .bili-video-card__info--owner,'
+        + ' .up-name, .bili-video-card__stats--owner',
+    );
+    return node ? (node.textContent || '').trim() : '';
+  }
+
+  function getCardTitle(card) {
+    const node = card.querySelector(
+      '.bili-video-card__info--tit, .title, a[href*="/video/"] .title,'
+        + ' .bili-video-card__info--tit__text',
+    );
+    if (!node) return '';
+    const text = node.textContent || node.getAttribute('title') || '';
+    return text.trim();
+  }
+
+  function cardMatchesFilter(card) {
+    const keywords = parseFilterList(settings.filterKeywords);
+    const ups = parseFilterList(settings.filterUps);
+    const minDuration = Number(settings.filterMinDuration) || 0;
+
+    if (ups.length) {
+      const up = getCardUpName(card);
+      if (ups.some((item) => up && up.includes(item))) return true;
+    }
+
+    if (keywords.length) {
+      const title = getCardTitle(card);
+      if (keywords.some((kw) => title && title.toLowerCase().includes(kw.toLowerCase()))) {
+        return true;
+      }
+    }
+
+    if (minDuration > 0) {
+      const seconds = getCardDurationSeconds(card);
+      if (seconds !== null && seconds < minDuration) return true;
+    }
+
+    return false;
+  }
+
+  function applyCardFilter(root) {
+    if (!settings.filterCardsEnabled) return;
+    const cards = root.querySelectorAll
+      ? [...root.querySelectorAll('.feed-card, .bili-video-card')]
+      : [];
+    for (const card of cards) {
+      if (card.hasAttribute('data-s4tm-filtered')) continue;
+      if (cardMatchesFilter(card)) {
+        card.setAttribute('data-s4tm-filtered', '1');
+        card.style.setProperty('display', 'none', 'important');
+      }
+    }
+  }
+
+  function resetCardFilter() {
+    document.querySelectorAll('[data-s4tm-filtered]').forEach((card) => {
+      card.style.removeProperty('display');
+      card.removeAttribute('data-s4tm-filtered');
+    });
+  }
+
+  function startCardFilterWatcher() {
+    // 复用 layout 的 MutationObserver 思路：首页才观察；DOM 变化频繁，加防抖
+    const observer = new MutationObserver(() => {
+      if (!isHomePage() || !settings.filterCardsEnabled) return;
+      // 已命中并隐藏的卡片不会再变，重扫只处理新挂载的卡片；防抖合并连续变更
+      clearLater(state.cardFilterTimer);
+      state.cardFilterTimer = later(() => {
+        state.cardFilterTimer = 0;
+        applyCardFilter(document);
+      }, 300);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    runtime.observers = runtime.observers || new Set();
+    runtime.observers.add(observer);
+  }
+
+  /* ---------- 功能八：评论区净化 ---------- */
+
+  /*
+   * B 站评论区（2026 起）是 Lit Web Components，评论内容在 shadowRoot 里，
+   * 普通 querySelector 拿不到。需要递归穿透 shadowRoot 找用户名 / 等级节点。
+   * 只隐藏命中规则的楼层，不篡改站点节点结构；取消时统一还原。
+   */
+
+  /** 递归收集 root（含各层 shadowRoot）内匹配 tag 的节点 */
+  function deepFindAll(root, tag, maxDepth = 6) {
+    const out = [];
+    const upper = tag.toUpperCase();
+    (function rec(node, depth) {
+      if (!node || depth > maxDepth) return;
+      if (node.querySelectorAll) {
+        node.querySelectorAll('*').forEach((el) => {
+          if (el.tagName === upper) out.push(el);
+          if (el.shadowRoot) rec(el.shadowRoot, depth + 1);
+        });
+      }
+      if (node.shadowRoot) rec(node.shadowRoot, depth + 1);
+    })(root, 0);
+    return out;
+  }
+
+  function getCommentUserName(commentEl) {
+    // 用户名在 shadowRoot 内：bili-comment-user-info 里的 #user-name 或 .user-name
+    const names = deepFindAll(commentEl, 'bili-comment-user-info', 6);
+    for (const info of names) {
+      const nameNode = info.shadowRoot?.querySelector('#user-name, .user-name');
+      const text = nameNode?.textContent?.trim();
+      if (text) return text;
+    }
+    // 退化：老版 DOM
+    const legacy = commentEl.querySelector('.user-name, .reply-user-name, #user-name');
+    return legacy ? legacy.textContent.trim() : '';
+  }
+
+  function getCommentLevel(commentEl) {
+    // 等级徽章常见于 user-info 的 .level 或 .bili-user-level 节点
+    const levels = deepFindAll(commentEl, 'bili-comment-user-info', 6);
+    for (const info of levels) {
+      const levelNode = info.shadowRoot?.querySelector('.level, .user-level, [class*="level"]');
+      const match = (levelNode?.textContent || '').match(/Lv\.?\s*(\d+)/i)
+        || (levelNode?.getAttribute('class') || '').match(/level-(\d+)/);
+      if (match) return Number(match[1]);
+    }
+    return null;
+  }
+
+  function commentMatchesFilter(commentEl) {
+    const keywords = parseFilterList(settings.filterCommentKeywords);
+    if (keywords.length) {
+      const user = getCommentUserName(commentEl);
+      if (keywords.some((kw) => user && user.includes(kw))) return true;
+    }
+    return false;
+  }
+
+  function isLowLevelComment(commentEl) {
+    const level = getCommentLevel(commentEl);
+    // 默认屏蔽 2 级及以下（含未识别出等级的，保持保守只屏蔽明确低等级的）
+    return level !== null && level <= 2;
+  }
+
+  function applyCommentFilter(root) {
+    if (!settings.filterCommentsEnabled) return;
+    const items = root.querySelectorAll
+      ? [...root.querySelectorAll('bili-comment-thread-renderer, .reply-item, .sub-reply-item')]
+      : [];
+    for (const item of items) {
+      if (item.hasAttribute('data-s4tm-comment-filtered')) continue;
+
+      const hitKeyword = commentMatchesFilter(item);
+      const hitLowLevel = settings.hideLowLevelComments && isLowLevelComment(item);
+
+      if (hitKeyword || hitLowLevel) {
+        item.setAttribute('data-s4tm-comment-filtered', '1');
+        item.style.setProperty('display', 'none', 'important');
+      }
+    }
+  }
+
+  function resetCommentFilter() {
+    document.querySelectorAll('[data-s4tm-comment-filtered]').forEach((item) => {
+      item.style.removeProperty('display');
+      item.removeAttribute('data-s4tm-comment-filtered');
+    });
+  }
+
+  function startCommentFilterWatcher() {
+    if (state.commentObserver) return;
+    state.commentObserver = new MutationObserver(() => {
+      if (!settings.filterCommentsEnabled) return;
+      // 评论区滚动加载会高频触发，防抖合并连续变更
+      clearLater(state.commentFilterTimer);
+      state.commentFilterTimer = later(() => {
+        state.commentFilterTimer = 0;
+        applyCommentFilter(document);
+      }, 300);
+    });
+    state.commentObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
   /* ---------- 样式 ---------- */
 
   function installStyles() {
@@ -866,22 +1147,69 @@
       }
 
       #s4tm-body {
-        padding: 12px;
+        padding: 8px 12px 12px;
       }
 
-      .s4tm-section-title {
-        margin: 0 0 8px;
-        color: #aeb6c2;
-        font-size: 12px;
-        letter-spacing: 0.4px;
+      /* ---------- 可折叠分区 ---------- */
+      .s4tm-section {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      }
+
+      .s4tm-section:last-of-type {
+        border-bottom: 0;
+      }
+
+      .s4tm-section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: 100%;
+        border: 0;
+        padding: 10px 2px;
+        color: #c8ced8;
+        background: none;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        text-align: left;
+        user-select: none;
+      }
+
+      .s4tm-section-head:hover {
+        color: #fff;
+      }
+
+      .s4tm-section-head:hover .s4tm-section-arrow {
+        color: #00aeec;
+      }
+
+      .s4tm-section-arrow {
+        flex: none;
+        color: #7c8490;
+        transition: transform 0.2s ease, color 0.15s ease;
+      }
+
+      .s4tm-section[data-open] .s4tm-section-arrow {
+        transform: rotate(180deg);
+      }
+
+      .s4tm-section-body {
+        display: none;
+        padding: 2px 2px 12px;
+      }
+
+      .s4tm-section[data-open] .s4tm-section-body {
+        display: block;
       }
 
       .s4tm-option {
         display: flex;
         align-items: flex-start;
         gap: 9px;
-        margin: 0 -8px;
-        padding: 9px 8px;
+        margin: 0;
+        padding: 7px 8px;
         border-radius: 9px;
         cursor: pointer;
         transition: background 0.15s ease;
@@ -907,8 +1235,35 @@
         font-size: 11px;
       }
 
-      .s4tm-section-title--spaced {
-        margin-top: 14px;
+      .s4tm-field {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 7px 0;
+      }
+
+      .s4tm-field label {
+        flex: none;
+        color: #aeb6c2;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .s4tm-field input {
+        flex: 1;
+        min-width: 0;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 7px;
+        padding: 5px 8px;
+        color: #e8e8e8;
+        background: rgba(255, 255, 255, 0.08);
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .s4tm-field input:focus {
+        outline: none;
+        border-color: rgba(0, 174, 236, 0.6);
+        background: rgba(0, 174, 236, 0.1);
       }
 
       #s4tm-audio {
@@ -1157,28 +1512,141 @@
         </div>
       </div>
       <div id="s4tm-body">
-        <div class="s4tm-section-title">功能设置</div>
+        <section class="s4tm-section" data-section="basic" data-open>
+          <button class="s4tm-section-head" type="button" aria-expanded="true">
+            <span>功能设置</span>
+            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div class="s4tm-section-body">
+            <label class="s4tm-option">
+              <input type="checkbox" id="s4tm-rotate">
+              <span>
+                视频旋转快捷键
+                <small>Alt + R：旋转 / 恢复视频</small>
+              </span>
+            </label>
 
-        <label class="s4tm-option">
-          <input type="checkbox" id="s4tm-rotate">
-          <span>
-            视频旋转快捷键
-            <small>Alt + R：旋转 / 恢复视频</small>
-          </span>
-        </label>
+            <label class="s4tm-option">
+              <input type="checkbox" id="s4tm-grid">
+              <span>
+                首页推荐 2 行 × 5 列
+                <small>隐藏轮播图，推荐视频自动回填为 2 × 5</small>
+              </span>
+            </label>
+          </div>
+        </section>
 
-        <label class="s4tm-option">
-          <input type="checkbox" id="s4tm-grid">
-          <span>
-            首页推荐 2 行 × 5 列
-            <small>隐藏轮播图，推荐视频自动回填为 2 × 5</small>
-          </span>
-        </label>
+        <section class="s4tm-section" data-section="audio" data-open>
+          <button class="s4tm-section-head" type="button" aria-expanded="true">
+            <span>音频提取</span>
+            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div class="s4tm-section-body">
+            <button class="s4tm-btn" id="s4tm-audio" type="button">提取音频</button>
+            <div id="s4tm-audio-status">一键导出完整音轨 · m4a / AAC 无损</div>
+          </div>
+        </section>
 
-        <div class="s4tm-section-title s4tm-section-title--spaced">音频提取</div>
+        <section class="s4tm-section" data-section="skip">
+          <button class="s4tm-section-head" type="button" aria-expanded="false">
+            <span>跳过片头片尾</span>
+            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div class="s4tm-section-body">
+            <label class="s4tm-option">
+              <input type="checkbox" id="s4tm-skip">
+              <span>
+                自动跳过片头片尾
+                <small>播放到片头 / 片尾区间时自动跳转</small>
+              </span>
+            </label>
 
-        <button class="s4tm-btn" id="s4tm-audio" type="button">提取音频</button>
-        <div id="s4tm-audio-status">一键导出完整音轨 · m4a / AAC 无损</div>
+            <div class="s4tm-field">
+              <label for="s4tm-skip-intro">片头秒数</label>
+              <input type="number" id="s4tm-skip-intro" min="0" step="1" placeholder="0">
+            </div>
+
+            <div class="s4tm-field">
+              <label for="s4tm-skip-outro">片尾秒数</label>
+              <input type="number" id="s4tm-skip-outro" min="0" step="1" placeholder="0">
+            </div>
+          </div>
+        </section>
+
+        <section class="s4tm-section" data-section="cards">
+          <button class="s4tm-section-head" type="button" aria-expanded="false">
+            <span>推荐视频过滤</span>
+            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div class="s4tm-section-body">
+            <label class="s4tm-option">
+              <input type="checkbox" id="s4tm-filter">
+              <span>
+                启用推荐过滤
+                <small>按 UP 主 / 关键词 / 时长隐藏推荐卡片</small>
+              </span>
+            </label>
+
+            <div class="s4tm-field">
+              <label for="s4tm-filter-ups">屏蔽 UP 主</label>
+              <input type="text" id="s4tm-filter-ups" placeholder="逗号分隔">
+            </div>
+
+            <div class="s4tm-field">
+              <label for="s4tm-filter-keywords">标题屏蔽词</label>
+              <input type="text" id="s4tm-filter-keywords" placeholder="逗号分隔">
+            </div>
+
+            <div class="s4tm-field">
+              <label for="s4tm-filter-min">最短时长（秒）</label>
+              <input type="number" id="s4tm-filter-min" min="0" step="1" placeholder="0">
+            </div>
+          </div>
+        </section>
+
+        <section class="s4tm-section" data-section="comments">
+          <button class="s4tm-section-head" type="button" aria-expanded="false">
+            <span>评论区净化</span>
+            <svg class="s4tm-section-arrow" viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div class="s4tm-section-body">
+            <label class="s4tm-option">
+              <input type="checkbox" id="s4tm-filter-comment">
+              <span>
+                启用评论过滤
+                <small>按用户名关键词隐藏评论</small>
+              </span>
+            </label>
+
+            <label class="s4tm-option">
+              <input type="checkbox" id="s4tm-low-level">
+              <span>
+                隐藏低等级评论
+                <small>隐藏 2 级及以下用户的评论</small>
+              </span>
+            </label>
+
+            <div class="s4tm-field">
+              <label for="s4tm-comment-keywords">评论屏蔽词</label>
+              <input type="text" id="s4tm-comment-keywords" placeholder="逗号分隔">
+            </div>
+          </div>
+        </section>
 
         <div id="s4tm-footer">配置自动保存 · 仅作用于 B 站</div>
       </div>
@@ -1217,6 +1685,134 @@
     on(panel.querySelector('#s4tm-audio'), 'click', () => {
       extractAudio();
     });
+
+    // ---- 跳过片头片尾 ----
+    const skipToggle = panel.querySelector('#s4tm-skip');
+    const skipIntro = panel.querySelector('#s4tm-skip-intro');
+    const skipOutro = panel.querySelector('#s4tm-skip-outro');
+
+    skipToggle.checked = settings.skipIntroEnabled;
+    skipIntro.value = settings.skipIntroSeconds;
+    skipOutro.value = settings.skipOutroSeconds;
+
+    on(skipToggle, 'change', (event) => {
+      settings.skipIntroEnabled = event.target.checked;
+      saveSettings();
+    });
+
+    on(skipIntro, 'input', () => {
+      settings.skipIntroSeconds = Math.max(0, Number(skipIntro.value) || 0);
+      saveSettings();
+    });
+
+    on(skipOutro, 'input', () => {
+      settings.skipOutroSeconds = Math.max(0, Number(skipOutro.value) || 0);
+      saveSettings();
+    });
+
+    // ---- 推荐视频过滤 ----
+    const filterToggle = panel.querySelector('#s4tm-filter');
+    const filterUps = panel.querySelector('#s4tm-filter-ups');
+    const filterKeywords = panel.querySelector('#s4tm-filter-keywords');
+    const filterMin = panel.querySelector('#s4tm-filter-min');
+
+    filterToggle.checked = settings.filterCardsEnabled;
+    filterUps.value = settings.filterUps;
+    filterKeywords.value = settings.filterKeywords;
+    filterMin.value = settings.filterMinDuration;
+
+    on(filterToggle, 'change', (event) => {
+      settings.filterCardsEnabled = event.target.checked;
+      saveSettings();
+      if (event.target.checked) {
+        applyCardFilter(document);
+      } else {
+        resetCardFilter();
+      }
+    });
+
+    on(filterUps, 'input', () => {
+      settings.filterUps = filterUps.value;
+      saveSettings();
+      resetCardFilter();
+      applyCardFilter(document);
+    });
+
+    on(filterKeywords, 'input', () => {
+      settings.filterKeywords = filterKeywords.value;
+      saveSettings();
+      resetCardFilter();
+      applyCardFilter(document);
+    });
+
+    on(filterMin, 'input', () => {
+      settings.filterMinDuration = Math.max(0, Number(filterMin.value) || 0);
+      saveSettings();
+      resetCardFilter();
+      applyCardFilter(document);
+    });
+
+    // ---- 评论区净化 ----
+    const commentToggle = panel.querySelector('#s4tm-filter-comment');
+    const lowLevelToggle = panel.querySelector('#s4tm-low-level');
+    const commentKeywords = panel.querySelector('#s4tm-comment-keywords');
+
+    commentToggle.checked = settings.filterCommentsEnabled;
+    lowLevelToggle.checked = settings.hideLowLevelComments;
+    commentKeywords.value = settings.filterCommentKeywords;
+
+    on(commentToggle, 'change', (event) => {
+      settings.filterCommentsEnabled = event.target.checked;
+      saveSettings();
+      if (event.target.checked) {
+        applyCommentFilter(document);
+      } else {
+        resetCommentFilter();
+      }
+    });
+
+    on(lowLevelToggle, 'change', (event) => {
+      settings.hideLowLevelComments = event.target.checked;
+      saveSettings();
+      resetCommentFilter();
+      applyCommentFilter(document);
+    });
+
+    on(commentKeywords, 'input', () => {
+      settings.filterCommentKeywords = commentKeywords.value;
+      saveSettings();
+      resetCommentFilter();
+      applyCommentFilter(document);
+    });
+
+    // ---- 折叠分区 ----
+    const DEFAULT_OPEN = { basic: true, audio: true, skip: false, cards: false, comments: false };
+    const openSections = { ...DEFAULT_OPEN, ...(settings.openSections || {}) };
+
+    const applySectionState = (section) => {
+      const key = section.dataset.section;
+      const open = openSections[key];
+      if (open) {
+        section.setAttribute('data-open', '');
+        section.querySelector('.s4tm-section-head').setAttribute('aria-expanded', 'true');
+      } else {
+        section.removeAttribute('data-open');
+        section.querySelector('.s4tm-section-head').setAttribute('aria-expanded', 'false');
+      }
+    };
+
+    for (const section of panel.querySelectorAll('.s4tm-section')) {
+      applySectionState(section);
+      on(section.querySelector('.s4tm-section-head'), 'click', () => {
+        const key = section.dataset.section;
+        openSections[key] = !openSections[key];
+        applySectionState(section);
+        settings.openSections = openSections;
+        saveSettings();
+        // 展开/折叠会改变面板高度，重新钳制位置避免顶出视口
+        placePanel();
+      });
+    }
 
     makeDraggable(panel, panel.querySelector('#s4tm-header'));
 
@@ -1261,11 +1857,25 @@
       state.dragFrame = 0;
     }
     state.layoutTimer = 0;
+    state.cardFilterTimer = 0;
+    state.commentFilterTimer = 0;
 
     if (state.rotatedVideo?.isConnected) restoreVideoStyle(state.rotatedVideo);
     state.rotatedVideo = null;
     state.savedVideoStyle = null;
     resetHomeLayout();
+    resetCardFilter();
+    resetCommentFilter();
+
+    // 回收新增观察者（推荐过滤 / 评论区过滤）
+    if (state.commentObserver) {
+      state.commentObserver.disconnect();
+      state.commentObserver = null;
+    }
+    if (runtime.observers) {
+      for (const observer of runtime.observers) observer.disconnect();
+      runtime.observers.clear();
+    }
 
     // 还原 history 包装，避免残留对跳转 URL 的改写
     if (runtime.historyPatched) {
@@ -1326,6 +1936,9 @@
     startLayoutWatcher();
     patchHistory();
     setupWideModeToggle();
+    startSkipWatcher();
+    startCardFilterWatcher();
+    startCommentFilterWatcher();
 
     if (isHomePage()) scheduleLayout(0);
 

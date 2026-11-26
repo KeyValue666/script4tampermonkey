@@ -1,11 +1,11 @@
 # 哔哩哔哩 · 首页增强与视频工具
 
-> 隐藏 B 站首页轮播，让推荐视频排成 2 行 × 5 列；Alt + R 一键旋转竖屏视频；一键导出视频的整条音轨；去广告与追踪参数、动态页宽屏。
+> 隐藏 B 站首页轮播，让推荐视频排成 2 行 × 5 列；Alt + R 一键旋转竖屏视频；一键导出视频整条音轨；去广告与追踪参数、跳过片头片尾、推荐与评论过滤、动态页宽屏。
 
 | 项 | 内容 |
 | --- | --- |
 | 脚本文件 | [bilibili-com.user.js](./bilibili-com.user.js) |
-| 当前版本 | `2.3.0` |
+| 当前版本 | `2.4.1` |
 | 适配域名 | `https://www.bilibili.com/*`、`https://t.bilibili.com/*` |
 | 脚本管理器 | Tampermonkey 5.x / Violentmonkey 2.x |
 | 安装 | [点击安装](https://raw.githubusercontent.com/KeyValue666/script4tampermonkey/main/sites/bilibili-com/bilibili-com.user.js) |
@@ -14,31 +14,35 @@
 
 - **首页推荐 2 行 × 5 列**：隐藏首页顶部的轮播图，右侧 10 张推荐卡片自动回填为 2 行 × 5 列。
 - **Alt + R 旋转视频**：对当前视频应用 `rotate(-90deg) scale(1.78)`，再按一次恢复，用来播放被压成竖屏的 PC 端稿件。
-- **可拖拽面板**：页面右上角悬浮，拖动标题栏换位置，`×` 隐藏；隐藏后右下角出现小电视吉祥物图标按钮可再次打开。所有开关即时生效并自动保存。
+- **可拖拽面板**：页面右上角悬浮，拖动标题栏换位置，`×` 隐藏；隐藏后右下角出现小电视吉祥物图标按钮可再次打开。功能按分类折叠（默认展开「功能设置」「音频提取」，其余点标题展开），所有开关即时生效并自动保存。
 - **提取视频音频**：在视频页点「提取音频」，脚本从页面内嵌的播放信息里取出独立音轨直链，一次下载整段 `m4a / AAC` 文件。秒级完成、原始码率无损、不需要播放，也不实时录音。
 - **去广告**：隐藏商单落地页链接、广告上报容器、空广告卡与屏蔽提示。
 - **首页增强**：隐藏首页商单广告卡与空视频卡，推荐区更干净。
 - **动态页宽屏**：`t.bilibili.com` 动态页默认铺满容器，标题栏提供「宽屏模式」开关，并隐藏带货卡。
 - **去追踪参数**：站内跳转时自动清掉地址栏里 `buvid`、`vd_source`、`spm_*`、`share_*` 等无意义追踪参数。
+- **自动跳过片头片尾**：面板可设片头 / 片尾秒数，播放进入区间时自动跳转，看番剧、合集不用手动拖进度条。
+- **推荐视频过滤**：按 UP 主、标题关键词、最短时长隐藏首页推荐卡片，减少低质内容打扰。
+- **评论区净化**：按用户名关键词隐藏评论，可选隐藏 2 级及以下低等级评论。
 
 ## 使用说明
 
 1. 安装脚本后打开 `https://www.bilibili.com/`，页面右上角会出现「B站个性化增强」面板。
 2. 勾选「首页推荐 2 行 × 5 列」：轮播图消失，推荐卡片排成 2 行 × 5 列；取消勾选立即还原。
 3. 播放视频时按 `Alt + R` 旋转，再按一次恢复；在输入框里按不会触发。
-4. 拖动标题栏可移动面板；点 `×` 隐藏面板。
+4. 拖动标题栏可移动面板；点 `×` 隐藏面板。面板各功能按分类折叠，点分组标题展开 / 收起对应设置项。
 5. 在视频页点「提取音频」：按钮变成「提取中…」，几秒内自动下载 `视频标题.m4a`（文件名与视频标题一致），无需播放视频、无需等待时长。
 6. 想要 mp3：浏览器本身编不了 mp3，用本地 ffmpeg 转一次，命令见「已知限制」。
 7. 面板位置与开关保存在浏览器本地，下次打开仍生效。
 8. 去广告、首页增强、去追踪参数默认开启，无需操作；动态页的「宽屏模式」可在 `t.bilibili.com` 顶部标签栏手动切换。
+9. 跳过片头片尾、推荐过滤、评论过滤需在面板里手动开启并填写参数；填了秒数 / 关键词才生效。
 
 ## 触发条件与覆盖页面
 
 | 页面 | 是否生效 | 说明 |
 | --- | --- | --- |
-| `https://www.bilibili.com/` | ✅ | 面板 + 首页 2 × 5 + 去广告 + 去追踪参数 |
-| `https://www.bilibili.com/video/BV...` | ✅ | 面板 + Alt + R 旋转 + 音频提取 + 去追踪参数 |
-| `https://www.bilibili.com/bangumi/...` | ✅ | 面板 + 旋转 + 音频提取 |
+| `https://www.bilibili.com/` | ✅ | 面板 + 首页 2 × 5 + 去广告 + 去追踪 + 推荐过滤 |
+| `https://www.bilibili.com/video/BV...` | ✅ | 面板 + Alt + R 旋转 + 音频提取 + 去追踪 + 跳过片头片尾 + 评论过滤 |
+| `https://www.bilibili.com/bangumi/...` | ✅ | 面板 + 旋转 + 音频提取 + 跳过片头片尾 |
 | `https://t.bilibili.com/` | ✅ | 面板 + 旋转 + 动态页宽屏 + 去追踪参数，无首页网格 |
 | 其它站点 | ❌ | 未在 `@match` 内 |
 
@@ -72,6 +76,7 @@
 - **禁用脚本后需刷新页面**：油猴禁用脚本时不会通知已注入实例，脚本无法自动卸载。所有资源已集中登记，调试时把 `CONFIG.debug` 改为 `true` 后可在控制台执行 `__S4TM__.destroy()` 主动还原；普通用户刷新一次页面即可彻底回收。
 - **去追踪参数只作用于站内跳转**：通过包装 `history.pushState` / `replaceState` 实现，覆盖 B 站单页应用内的跳转；直接输入 URL 或外链带入的参数不受影响（不影响使用，只是跳转后首次仍保留原参数）。
 - **不含去 WebRTC / 去 P2P / 屏蔽上报 / 视频裁切 / 原画直播**：这些功能需要改写页面全局对象（`unsafeWindow`），与本脚本 `@grant none` 的隔离世界架构冲突。要保持无依赖、单文件、最小权限的红线，故未移植；确有需要请另行安装专门的脚本。
+- **评论过滤依赖 Shadow DOM 结构**：B 站评论区（2026 起）是 Lit Web Components，用户名 / 等级在 `shadowRoot` 里。脚本递归穿透各层 `shadowRoot` 读取；若 B 站改版导致节点结构变化，低等级判断可能失效（关键词过滤不受影响，仍按用户名文本匹配）。
 
 ## 变更记录
 
@@ -123,6 +128,12 @@ B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画�
 - **去广告 / 首页增强 / 动态页宽屏**：纯 CSS 实现，随 `installStyles()` 注入独立的 `#s4tm-enhance-styles`。全部限定在稳定选择器上，不触碰站点布局关键类名；动态页宽屏的「宽屏模式」按钮复用站点原生的 `WIDE_OPT_OUT` 存储键与 `html[wide]` 属性，行为与站点原生一致。
 - **去追踪参数**：包装 `history.pushState` / `replaceState`。`history` 是页面与隔离世界共享的同一对象，因此 `@grant none` 也能拦截站内跳转。只删 `TRACKING_PARAMS` 白名单里的参数（含 `share*` / `spm*` 正则），URL 非法时原样返回不打断站点跳转；`destroy()` 时还原原始实现并清除幂等标记。
 
+### 跳过片头片尾与过滤（2.4.0）
+
+- **跳过片头片尾**：监听 `document` 上的 `timeupdate`（捕获阶段），每次回调重新取当前可见 `video`，不长期持有引用。`applySkipIntroOutro()` 判 `currentTime < 片头` 或 `>= duration - 片尾` 时 `video.currentTime` seek，`state.lastSkippedAt` 做 1.2 秒防抖，避免 seek 后 `timeupdate` 又触发造成死循环。
+- **推荐过滤**：`MutationObserver` 观察 `.feed-card` / `.bili-video-card` 动态挂载；`cardMatchesFilter()` 依次匹配 UP 主（`.bili-video-card__info--author` 等）、标题关键词、时长（`mm:ss` 解析）。命中加 `data-s4tm-filtered` + `display:none`，取消勾选或改参数时 `resetCardFilter()` 统一还原。
+- **评论过滤**：`deepFindAll()` 递归穿透各层 `shadowRoot` 找 `bili-comment-user-info`，读 `#user-name` / 等级徽标。用户名关键词用 `commentMatchesFilter()`，低等级（≤2 级）用 `isLowLevelComment()` 解析 `Lv.n` 或 `level-n`。命中 `bili-comment-thread-renderer` / `.reply-item` 加标记隐藏，`resetCommentFilter()` 还原。
+
 ### 选择器依赖
 
 | 用途 | 选择器 | 说明 |
@@ -131,6 +142,10 @@ B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画�
 | 推荐容器 | 轮播向上 4 层内、`display` 为 grid/flex、直接子元素至少 4 个卡片的祖先 | 实测命中 `.container.is-version8` |
 | 推荐卡片 | `.feed-card`、`.bili-video-card` | 只用于计数与间距修正 |
 | 视频链接 | `a[href*="/video/"]` | 确认找到的确实是轮播 |
+| 卡片 UP 主 | `.bili-video-card__info--author`、`.up-name` 等 | 推荐过滤取 UP 主名 |
+| 卡片时长 | `.bili-video-card__stats__duration`、`.duration` | `mm:ss` 解析成秒 |
+| 评论用户名 | `bili-comment-user-info` shadowRoot 内 `#user-name` | 穿透 Shadow DOM 读取 |
+| 评论等级 | `bili-comment-user-info` shadowRoot 内 `.level` / `[class*="level"]` | 解析 `Lv.n` / `level-n` |
 
 ### 易碎假设
 
@@ -138,6 +153,8 @@ B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画�
 - 第 7 张之后的卡片仍带楼层间距（脚本清零的是 `margin-top`；若 B 站改用 `padding` 或额外包裹层，需要同步调整）。
 - 音频提取依赖页面内嵌 `window.__playinfo__.data.dash.audio` 及 `baseUrl` / `backupUrl` 字段。若 B 站改为纯接口下发播放信息、去掉内嵌对象，脚本会走 `playurl` 兜底；若连 `cid` 都取不到，就只提示不工作，需要同步调整 `readPageObject()` 的取值路径。
 - 音轨直链带时效签名，长时间停在页面上再点提取可能遇到 403，刷新页面即可重取。
+- 推荐过滤依赖卡片内的 UP 主 / 时长节点选择器；B 站改版后若类名变化，UP 主与时长判断会失效（标题关键词过滤仍可用，但同样依赖 `.title` 类）。
+- 评论低等级判断依赖 `bili-comment-user-info` shadowRoot 内的等级徽标结构；等级徽标缺失时该条评论不会被判定为低等级（关键词过滤不受影响）。
 
 ### 回归验证
 
@@ -150,5 +167,8 @@ B 站视频页内嵌 `window.__playinfo__`，其中 `data.dash.audio` 是与画�
 7. 首页点「提取音频」：应提示「没找到独立音轨」或类似降级文案，Console 不报错、页面无异常。
 8. 用 DevTools 屏蔽主直链（模拟 403）：应自动尝试备用地址，或给出「提取失败」提示，不抛未捕获异常。
 9. 提取过程中反复点击按钮：按钮置灰，只触发一次下载。
+10. 视频页设片头 10 秒，从 0 开始播放：应自动跳到 10 秒处；设片尾 10 秒，拖到结尾附近：应自动跳回 `时长 - 10` 秒。
+11. 首页勾选「推荐过滤」，填一个 UP 主名或标题关键词：对应卡片应立即隐藏，取消勾选后恢复。
+12. 视频页勾选「评论过滤」，填一个用户名关键词：对应评论应立即隐藏；勾选「隐藏低等级评论」后，低等级评论消失，取消后恢复。
 10. 首页确认无广告卡、无空卡、无屏蔽提示；`t.bilibili.com` 确认带货卡消失、顶部出现「宽屏模式」按钮且切换生效。
 11. 站内跳转（如首页 → 视频页）后，检查地址栏：`vd_source`、`spm_*` 等参数应被自动删除。
