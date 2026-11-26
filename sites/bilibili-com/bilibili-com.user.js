@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S4TM · 哔哩哔哩 · 首页增强
 // @namespace    https://github.com/KeyValue666/script4tampermonkey/sites/bilibili-com
-// @version      2.7.0
+// @version      2.8.0
 // @description  B 站首页 2×5 推荐、点击旋转视频、音频提取、去广告与追踪、跳过片头片尾、推荐/评论过滤、动态页宽屏
 // @author       KeyValue666
 // @match        https://www.bilibili.com/*
@@ -1030,7 +1030,7 @@
       #s4tm-panel {
         position: fixed;
         z-index: 2147483647;
-        width: 288px;
+        width: 560px;
         max-width: calc(100vw - 16px);
         color: #1d1d1f;
         background: rgba(255, 255, 255, 0.78);
@@ -1137,6 +1137,15 @@
         padding: 12px 14px 14px;
       }
 
+      /* ---------- 分组双列网格 ---------- */
+      .s4tm-groups {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        column-gap: 16px;
+        row-gap: 14px;
+        align-items: start;
+      }
+
       /* ---------- 快速操作按钮 ---------- */
       .s4tm-actions-row {
         display: flex;
@@ -1193,11 +1202,7 @@
 
       /* ---------- 分组 ---------- */
       .s4tm-group {
-        margin-top: 14px;
-      }
-
-      .s4tm-group:first-of-type {
-        margin-top: 0;
+        min-width: 0;
       }
 
       .s4tm-group-title {
@@ -1399,7 +1404,11 @@
 
       @media (max-width: 520px) {
         #s4tm-panel {
-          width: 252px;
+          width: 288px;
+        }
+
+        .s4tm-groups {
+          grid-template-columns: 1fr;
         }
       }
     `;
@@ -1563,6 +1572,7 @@
         </div>
         <div id="s4tm-audio-status">一键导出完整音轨 · m4a / AAC 无损</div>
 
+        <div class="s4tm-groups">
         <!-- 首页 -->
         <div class="s4tm-group">
           <h3 class="s4tm-group-title">首页</h3>
@@ -1651,6 +1661,7 @@
               <input type="text" id="s4tm-comment-keywords" placeholder="逗号分隔">
             </div>
           </div>
+        </div>
         </div>
 
         <div id="s4tm-footer">配置自动保存 · 仅作用于 B 站</div>

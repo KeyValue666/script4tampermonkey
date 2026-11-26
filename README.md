@@ -44,7 +44,7 @@
 
 | 站点 | 脚本 | 版本 | 功能简介 | 功能说明 |
 | --- | --- | --- | --- | --- |
-| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 2.7.0 | 首页 2×5 + 点击旋转视频 + 音频提取 + 去广告/追踪 + 跳过片头片尾 + 推荐/评论过滤 + 动态宽屏 | [说明](sites/bilibili-com/README.md) |
+| 哔哩哔哩 | [bilibili-com.user.js](sites/bilibili-com/bilibili-com.user.js) | 2.8.0 | 首页 2×5 + 点击旋转视频 + 音频提取 + 去广告/追踪 + 跳过片头片尾 + 推荐/评论过滤 + 动态宽屏 | [说明](sites/bilibili-com/README.md) |
 | 虎牙直播 | [huya-com.user.js](sites/huya-com/huya-com.user.js) | 0.2.2 | 只留视频 / 弹幕 / 发言，隐藏推荐礼物侧栏、铺满视口、拦截埋点广告请求，兼容大背景装修房 | [说明](sites/huya-com/README.md) |
 | 抖音 | [douyin-com.user.js](sites/douyin-com/douyin-com.user.js) | 0.2.3 | 刷视频去广告 / 看直播只留画面与弹幕，拦截埋点广告请求、预取与特效开销，支持关键词与作者屏蔽 | [说明](sites/douyin-com/README.md) |
 | 小红书 | [xiaohongshu-com.user.js](sites/xiaohongshu-com/xiaohongshu-com.user.js) | 0.3.4 | 笔记页一键打包下载全部图片、无水印视频，取 CDN 原图、去压缩与水印参数，面板可拖拽 | [说明](sites/xiaohongshu-com/README.md) |
